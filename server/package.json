@@ -1,0 +1,41 @@
+{
+  "name": "hue-midi",
+  "version": "1.0.0",
+  "description": "Control Philips Hue lights with MIDI from Ableton Live or any MIDI source",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx watch src/index.ts",
+    "start": "npm run build && node dist/index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "hue",
+    "philips-hue",
+    "midi",
+    "ableton",
+    "lighting",
+    "dmx",
+    "music",
+    "live-performance"
+  ],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@abandonware/noble": "^1.9.2-26",
+    "axios": "^1.12.2",
+    "bonjour-service": "^1.3.0",
+    "express": "^5.1.0",
+    "midi": "^2.0.0",
+    "node-hue-api": "^5.0.0-beta.16",
+    "node-hue-ble": "^1.1.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.3",
+    "@types/node": "^24.9.1",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.20.6",
+    "typescript": "^5.9.3"
+  }
+}

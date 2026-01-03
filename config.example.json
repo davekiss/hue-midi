@@ -1,0 +1,53 @@
+{
+  "connectionMode": "bridge",
+  "bridgeIp": "192.168.1.100",
+  "bridgeUsername": "your-bridge-username-here",
+  "midiPortName": "Hue MIDI Bridge",
+  "mappings": [
+    {
+      "midiNote": 60,
+      "midiChannel": 0,
+      "lightId": "1",
+      "action": {
+        "type": "color",
+        "colorHue": 0,
+        "colorSat": 254,
+        "brightnessMode": "velocity",
+        "transitionTime": 2
+      }
+    },
+    {
+      "midiNote": 62,
+      "midiChannel": 0,
+      "lightId": "1",
+      "action": {
+        "type": "color",
+        "colorHue": 25500,
+        "colorSat": 254,
+        "brightnessMode": "velocity",
+        "transitionTime": 2
+      }
+    },
+    {
+      "midiNote": 64,
+      "midiChannel": 0,
+      "lightId": "2",
+      "action": {
+        "type": "toggle",
+        "brightnessMode": "fixed",
+        "fixedBrightness": 254,
+        "transitionTime": 1
+      }
+    },
+    {
+      "midiNote": 67,
+      "midiChannel": 0,
+      "lightId": "2",
+      "action": {
+        "type": "effect",
+        "effect": "colorloop",
+        "transitionTime": 2
+      }
+    }
+  ]
+}

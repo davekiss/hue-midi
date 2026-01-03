@@ -1,0 +1,411 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hue MIDI Bridge</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: #0f0f0f;
+            color: #e0e0e0;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            padding: 30px 20px;
+            margin-bottom: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(102, 126, 234, 0.3);
+        }
+
+        h1 {
+            font-size: 2em;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            opacity: 0.9;
+            font-size: 1.1em;
+        }
+
+        .section {
+            background: #1a1a1a;
+            border-radius: 8px;
+            padding: 25px;
+            margin-bottom: 20px;
+            border: 1px solid #333;
+        }
+
+        h2 {
+            margin-bottom: 20px;
+            color: #667eea;
+            font-size: 1.5em;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.9em;
+            font-weight: 500;
+        }
+
+        .status.connected {
+            background: #10b981;
+            color: white;
+        }
+
+        .status.disconnected {
+            background: #ef4444;
+            color: white;
+        }
+
+        .status.pending {
+            background: #f59e0b;
+            color: white;
+        }
+
+        button {
+            background: #667eea;
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.3s;
+            margin-right: 10px;
+            margin-bottom: 10px;
+        }
+
+        button:hover {
+            background: #764ba2;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+            transform: none;
+        }
+
+        button.danger {
+            background: #ef4444;
+        }
+
+        button.danger:hover {
+            background: #dc2626;
+        }
+
+        input, select {
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #e0e0e0;
+            padding: 10px;
+            border-radius: 5px;
+            font-size: 1em;
+            width: 100%;
+            margin-bottom: 10px;
+        }
+
+        input:focus, select:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 5px;
+            color: #aaa;
+            font-size: 0.9em;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+        }
+
+        .light-card {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            border: 1px solid #444;
+        }
+
+        .light-card h3 {
+            margin-bottom: 10px;
+            color: #667eea;
+        }
+
+        .mapping-item {
+            background: #2a2a2a;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 10px;
+            border: 1px solid #444;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .mapping-info {
+            flex: 1;
+        }
+
+        .mapping-item .badge {
+            display: inline-block;
+            background: #667eea;
+            color: white;
+            padding: 3px 10px;
+            border-radius: 12px;
+            font-size: 0.85em;
+            margin-right: 8px;
+        }
+
+        .midi-activity {
+            background: #2a2a2a;
+            padding: 10px;
+            border-radius: 5px;
+            height: 150px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            border: 1px solid #444;
+        }
+
+        .midi-message {
+            padding: 5px;
+            margin-bottom: 5px;
+            border-left: 3px solid #667eea;
+            padding-left: 10px;
+        }
+
+        .log-entry {
+            padding: 5px;
+            margin-bottom: 5px;
+            border-left: 3px solid #10b981;
+            padding-left: 10px;
+        }
+
+        .error {
+            color: #ef4444;
+            padding: 10px;
+            background: rgba(239, 68, 68, 0.1);
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+
+        .success {
+            color: #10b981;
+            padding: 10px;
+            background: rgba(16, 185, 129, 0.1);
+            border-radius: 5px;
+            margin: 10px 0;
+        }
+
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .modal.active {
+            display: flex;
+        }
+
+        .modal-content {
+            background: #1a1a1a;
+            padding: 30px;
+            border-radius: 10px;
+            max-width: 600px;
+            width: 90%;
+            max-height: 90vh;
+            overflow-y: auto;
+            border: 1px solid #333;
+        }
+
+        .modal-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .close-btn {
+            background: none;
+            color: #aaa;
+            font-size: 1.5em;
+            padding: 0;
+            width: 30px;
+            height: 30px;
+            cursor: pointer;
+        }
+
+        .close-btn:hover {
+            color: #fff;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🎹 Hue MIDI Bridge</h1>
+            <p class="subtitle">Control your Philips Hue lights with MIDI</p>
+        </header>
+
+        <!-- Connection Status -->
+        <div class="section">
+            <h2>Connection Status</h2>
+            <div>
+                <strong>MIDI Port:</strong> <span id="midi-status" class="status disconnected">Not Connected</span>
+            </div>
+            <div style="margin-top: 10px;">
+                <strong>Hue Bridge:</strong> <span id="hue-status" class="status disconnected">Not Connected</span>
+            </div>
+        </div>
+
+        <!-- MIDI Configuration -->
+        <div class="section">
+            <h2>MIDI Configuration</h2>
+            <button onclick="openVirtualPort()">Create Virtual MIDI Port</button>
+            <button onclick="refreshMidiPorts()">Refresh Physical Ports</button>
+            <div id="midi-ports" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Hue Configuration -->
+        <div class="section">
+            <h2>Hue Bridge Setup</h2>
+            <button onclick="discoverBridges()">Discover Bridges</button>
+            <div id="bridge-list" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Bluetooth Configuration -->
+        <div class="section">
+            <h2>Bluetooth Setup (No Bridge Required)</h2>
+            <div style="margin-bottom: 15px;">
+                <strong>Bluetooth Status:</strong> <span id="bluetooth-status" class="status disconnected">Unknown</span>
+            </div>
+            <button onclick="scanBluetoothLights()">Scan for Bluetooth Lights</button>
+            <button onclick="refreshBluetoothStatus()">Refresh Status</button>
+            <div id="bluetooth-lights" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Lights -->
+        <div class="section">
+            <h2>Available Lights</h2>
+            <button onclick="refreshLights()">Refresh Lights</button>
+            <div id="lights-grid" class="grid" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Mappings -->
+        <div class="section">
+            <h2>MIDI Mappings</h2>
+            <button onclick="openMappingModal()">Add New Mapping</button>
+            <button onclick="clearMappings()" class="danger">Clear All Mappings</button>
+            <div id="mappings-list" style="margin-top: 15px;"></div>
+        </div>
+
+        <!-- Activity Monitor -->
+        <div class="section">
+            <h2>Activity Monitor</h2>
+            <div class="midi-activity" id="activity-log"></div>
+        </div>
+    </div>
+
+    <!-- Add Mapping Modal -->
+    <div id="mapping-modal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>Add MIDI Mapping</h2>
+                <button class="close-btn" onclick="closeMappingModal()">&times;</button>
+            </div>
+            <form id="mapping-form" onsubmit="addMapping(event)">
+                <div class="form-group">
+                    <label>MIDI Channel (0-15)</label>
+                    <input type="number" id="midi-channel" min="0" max="15" value="0" required>
+                </div>
+                <div class="form-group">
+                    <label>MIDI Note (0-127)</label>
+                    <input type="number" id="midi-note" min="0" max="127" required>
+                </div>
+                <div class="form-group">
+                    <label>Light</label>
+                    <select id="light-select" required></select>
+                </div>
+                <div class="form-group">
+                    <label>Action Type</label>
+                    <select id="action-type" onchange="updateActionFields()" required>
+                        <option value="color">Color</option>
+                        <option value="brightness">Brightness</option>
+                        <option value="toggle">On/Off Toggle</option>
+                        <option value="effect">Effect</option>
+                    </select>
+                </div>
+                <div id="color-fields">
+                    <div class="form-group">
+                        <label>Hue (0-65535)</label>
+                        <input type="number" id="color-hue" min="0" max="65535" value="0">
+                    </div>
+                    <div class="form-group">
+                        <label>Saturation (0-254)</label>
+                        <input type="number" id="color-sat" min="0" max="254" value="254">
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label>Brightness Mode</label>
+                    <select id="brightness-mode">
+                        <option value="velocity">Use MIDI Velocity</option>
+                        <option value="fixed">Fixed Brightness</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Fixed Brightness (0-254)</label>
+                    <input type="number" id="fixed-brightness" min="0" max="254" value="254">
+                </div>
+                <div class="form-group" id="effect-fields" style="display: none;">
+                    <label>Effect</label>
+                    <select id="effect-type">
+                        <option value="colorloop">Color Loop</option>
+                        <option value="flash">Flash</option>
+                        <option value="pulse">Pulse</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>Transition Time (100ms increments)</label>
+                    <input type="number" id="transition-time" min="0" max="100" value="2">
+                </div>
+                <button type="submit">Add Mapping</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
