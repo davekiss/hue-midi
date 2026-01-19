@@ -23,6 +23,8 @@ export function useWebSocket() {
   const scenes = useStore((state) => state.scenes);
   const setTempo = useStore((state) => state.setTempo);
   const setCurrentPreset = useStore((state) => state.setCurrentPreset);
+  const setCurrentSnapshot = useStore((state) => state.setCurrentSnapshot);
+  const setStreamingStatus = useStore((state) => state.setStreamingStatus);
 
   useEffect(() => {
     let reconnectTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -96,6 +98,10 @@ export function useWebSocket() {
         // Handle CC messages - convert to activity log format
         if (isRecord(data) && typeof data.channel === 'number' && typeof data.controller === 'number' && typeof data.value === 'number') {
           addActivity('midi', `CC${data.controller} = ${data.value} (Ch ${data.channel})`);
+          // Track CC69 as Helix snapshot (values 0-7)
+          if (data.controller === 69 && data.value >= 0 && data.value <= 7) {
+            setCurrentSnapshot(data.value);
+          }
         }
         break;
       case 'lightControlled':
@@ -117,6 +123,24 @@ export function useWebSocket() {
         break;
       case 'error':
         console.error('Server error:', data);
+        break;
+      case 'streamingStarted':
+        addActivity('streaming', 'Entertainment streaming started');
+        // Refresh streaming status
+        import('./api').then(({ api }) => {
+          api.entertainment.getStatus().then(setStreamingStatus).catch(console.error);
+        });
+        break;
+      case 'streamingStopped':
+        addActivity('streaming', 'Entertainment streaming stopped');
+        import('./api').then(({ api }) => {
+          api.entertainment.getStatus().then(setStreamingStatus).catch(console.error);
+        });
+        break;
+      case 'streamingError':
+        if (isRecord(data) && typeof data.error === 'string') {
+          addActivity('streaming', `Streaming error: ${data.error}`);
+        }
         break;
       default:
         break;

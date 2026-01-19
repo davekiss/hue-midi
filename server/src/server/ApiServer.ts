@@ -8,6 +8,7 @@ import { HueBluetoothController } from '../hue/HueBluetoothController';
 import { MappingEngine } from '../mapping/MappingEngine';
 import { ConfigManager } from '../mapping/ConfigManager';
 import { CustomEffectsEngine, CustomEffectType } from '../effects/CustomEffectsEngine';
+import { HueStreamingService, StreamingRouter, ChannelMapping } from '../streaming';
 import { HueLight, MidiMapping, Scene, SceneLightState, SceneTransition, LightStateOverride, LightAnimationSync, LightAnimation } from '../types';
 import { randomUUID } from 'crypto';
 
@@ -21,6 +22,9 @@ export class ApiServer {
   private mappingEngine: MappingEngine;
   private configManager: ConfigManager;
   private customEffectsEngine: CustomEffectsEngine;
+  private streamingService: HueStreamingService | null = null;
+  private streamingRouter: StreamingRouter | null = null;
+  private channelMappings: ChannelMapping[] = [];
 
   constructor(
     midiHandler: MidiHandler,
@@ -38,6 +42,9 @@ export class ApiServer {
     this.mappingEngine = mappingEngine;
     this.configManager = configManager;
     this.customEffectsEngine = new CustomEffectsEngine(bridgeController);
+
+    // Connect CustomEffectsEngine to MappingEngine so custom effects work even without streaming
+    this.mappingEngine.setCustomEffectsEngine(this.customEffectsEngine);
 
     this.setupMiddleware();
     this.setupRoutes();
@@ -98,6 +105,13 @@ export class ApiServer {
     this.app.post('/api/test/scene/stop', this.stopScenePreview.bind(this));
     this.app.get('/api/tempo', this.getTempo.bind(this));
     this.app.post('/api/test/bluetooth/diagnostic', this.testBluetoothDiagnostic.bind(this));
+
+    // Entertainment/Streaming routes
+    this.app.get('/api/hue/entertainment/configurations', this.getEntertainmentConfigurations.bind(this));
+    this.app.post('/api/hue/entertainment/clientkey', this.generateClientKey.bind(this));
+    this.app.post('/api/hue/entertainment/start', this.startStreaming.bind(this));
+    this.app.post('/api/hue/entertainment/stop', this.stopStreaming.bind(this));
+    this.app.get('/api/hue/entertainment/status', this.getStreamingStatus.bind(this));
   }
 
   /**
@@ -277,9 +291,10 @@ export class ApiServer {
       const note = parseInt(req.params.note);
       const triggerType = req.query.triggerType as 'note' | 'cc' | undefined;
       const ccValue = req.query.ccValue ? parseInt(req.query.ccValue as string) : undefined;
+      const preset = req.query.preset ? parseInt(req.query.preset as string) : undefined;
 
-      this.mappingEngine.removeMapping(note, channel, triggerType, ccValue);
-      this.configManager.removeMapping(note, channel, triggerType, ccValue);
+      this.mappingEngine.removeMapping(note, channel, triggerType, ccValue, preset);
+      this.configManager.removeMapping(note, channel, triggerType, ccValue, preset);
       await this.configManager.save();
       res.json({ success: true });
     } catch (error: any) {
@@ -882,83 +897,75 @@ export class ApiServer {
 
       // Check if this light is connected via Bluetooth
       const isBluetoothLight = this.bluetoothController.isLightConnected(lightId);
-      console.log(`[API] isBluetoothLight: ${isBluetoothLight}`);
 
       if (isBluetoothLight) {
-        // Use Bluetooth controller
         console.log(`[API] Using Bluetooth controller for light ${lightId}`);
         await this.bluetoothController.setLightState(lightId, state);
         res.json({ success: true });
         return;
       }
 
-      console.log(`[API] Using Bridge controller for light ${lightId}`);
+      // Check if streaming is active and this light is in the zone
+      const useStreaming = this.streamingRouter?.isStreaming() && this.streamingRouter?.isLightInZone(lightId);
+      console.log(`[API] useStreaming: ${useStreaming}, streamingActive: ${this.streamingRouter?.isStreaming()}, inZone: ${this.streamingRouter?.isLightInZone(lightId)}`);
 
-      // Otherwise use Bridge controller
-      console.log(`Using Bridge controller for light ${lightId}`);
+      if (useStreaming) {
+        // === STREAMING MODE ===
+        // All light control goes through the streaming router
+        // Native Hue effects are NOT supported in streaming mode
 
-      // Handle native Hue V2 dynamic effects
-      const nativeEffects = ['sparkle', 'fire', 'candle', 'prism', 'opal', 'glisten', 'underwater', 'cosmos', 'sunbeam', 'enchant'];
-      if (state.effect && nativeEffects.includes(state.effect)) {
-        try {
-          // Stop any running custom effect before starting native effect
+        // Stop any running custom effect first
+        await this.customEffectsEngine.stopEffect(lightId);
+
+        // Handle 'none' effect - stop effects and set static color
+        if (state.effect === 'none') {
+          console.log(`[API] Stopping effects on light ${lightId} (streaming mode)`);
           await this.customEffectsEngine.stopEffect(lightId);
-          await this.bridgeController.setDynamicEffect(lightId, state.effect, undefined, {
-            color: state.effectColor,
-            speed: state.effectSpeed,
-            colorTemperature: state.effectTemperature,
+        }
+
+        // Streaming presets (gradient-aware, 50Hz)
+        const streamingPresets = [
+          'candle', 'fire', 'fireplace', 'aurora', 'ocean', 'underwater', 'lava',
+          'thunderstorm', 'rain', 'forest', 'meadow', 'starfield', 'galaxy',
+          'traffic', 'highway',
+          'sparkle', 'prism', 'colorloop', 'opal', 'glisten',
+          'tv_ballast', 'fluorescent', 'sparse', 'scattered',
+          'cozy_window', 'party_window', 'evening_window',
+          'marquee', 'marquee_alternate', 'theater',
+          'rainbow_chase', 'two_color_chase', 'wave', 'wave_chase', 'bounce', 'bounce_chase', 'comet', 'comet_chase', 'pulse',
+        ];
+
+        if (state.effect && streamingPresets.includes(state.effect as string)) {
+          console.log(`[API] Starting streaming preset "${state.effect}" on light ${lightId}`);
+
+          const started = await this.customEffectsEngine.startPresetEffect(lightId, state.effect as string, {
+            speed: state.effectSpeed ? Math.round(state.effectSpeed * 100) : 50,
+            color1: state.effectColor,
+            color2: state.effectColor2,
+            brightness: state.brightness ?? 254,
+            intensity: state.effectIntensity ?? 0.7,
           });
-          res.json({ success: true });
-          return;
-        } catch (error) {
-          console.warn('Failed to set dynamic effect, falling back to standard control:', error);
-        }
-      }
 
-      // Handle signaling effects (flash, flash_color, alternating)
-      const signalingEffects = ['flash', 'flash_color', 'alternating'];
-      if (state.effect && signalingEffects.includes(state.effect)) {
-        try {
-          // Stop any running custom effect before starting signaling effect
-          await this.customEffectsEngine.stopEffect(lightId);
-          const duration = state.effectDuration ?? 2000;
-
-          if (state.effect === 'flash') {
-            console.log(`[API] Setting flash signaling on light ${lightId} for ${duration}ms`);
-            await this.bridgeController.setSignaling(lightId, 'on_off', duration);
-          } else if (state.effect === 'flash_color') {
-            const colors = state.effectColor ? [state.effectColor] : undefined;
-            console.log(`[API] Setting flash_color signaling on light ${lightId} for ${duration}ms with color:`, colors);
-            await this.bridgeController.setSignaling(lightId, 'on_off_color', duration, colors);
-          } else if (state.effect === 'alternating') {
-            const colors: Array<{ x: number; y: number }> = [];
-            if (state.effectColor) colors.push(state.effectColor);
-            if (state.effectColor2) colors.push(state.effectColor2);
-            console.log(`[API] Setting alternating signaling on light ${lightId} for ${duration}ms with colors:`, colors);
-            await this.bridgeController.setSignaling(lightId, 'alternating', duration, colors.length > 0 ? colors : undefined);
+          if (started) {
+            res.json({ success: true, mode: 'streaming', effect: state.effect, preset: true });
+            return;
           }
-          res.json({ success: true });
-          return;
-        } catch (error) {
-          console.warn('Failed to set signaling effect:', error);
+          // Fall through if preset not found
         }
-      }
 
-      // Handle custom effects via CustomEffectsEngine
-      const customEffects = ['strobe', 'police', 'ambulance', 'lightning', 'color_flash', 'breathe_smooth', 'chase', 'desert', 'tv_flicker'];
-      // Also handle legacy effects that map to custom effects
-      const legacyToCustomMap: Record<string, CustomEffectType> = {
-        'pulse': 'breathe_smooth',
-        'breathe': 'breathe_smooth',
-        'color_cycle': 'chase',
-      };
+        // Handle legacy custom effects via CustomEffectsEngine (BPM-based)
+        const customEffects = ['strobe', 'police', 'ambulance', 'lightning', 'color_flash', 'breathe_smooth', 'chase', 'desert', 'tv_flicker'];
+        const legacyToCustomMap: Record<string, CustomEffectType> = {
+          'pulse': 'breathe_smooth',
+          'breathe': 'breathe_smooth',
+          'color_cycle': 'chase',
+        };
 
-      const effectToUse = legacyToCustomMap[state.effect as string] || state.effect;
+        const effectToUse = legacyToCustomMap[state.effect as string] || state.effect;
 
-      if (state.effect && (customEffects.includes(effectToUse as string) || legacyToCustomMap[state.effect as string])) {
-        try {
+        if (state.effect && (customEffects.includes(effectToUse as string) || legacyToCustomMap[state.effect as string])) {
           const bpm = state.effectBpm ?? 120;
-          console.log(`[API] Starting custom effect ${effectToUse} on light ${lightId} at ${bpm} BPM`);
+          console.log(`[API] Starting legacy custom effect ${effectToUse} on light ${lightId} at ${bpm} BPM`);
 
           await this.customEffectsEngine.startEffect(lightId, effectToUse as CustomEffectType, {
             speed: bpm,
@@ -968,21 +975,102 @@ export class ApiServer {
             intensity: state.effectIntensity ?? 0.7,
           });
 
-          res.json({ success: true });
+          res.json({ success: true, mode: 'streaming', effect: effectToUse });
+          return;
+        }
+
+        // Set static color/brightness via streaming
+        const rgb = this.stateToRgb(state);
+        if (rgb) {
+          console.log(`[API] Setting color via streaming for light ${lightId}: RGB(${rgb.join(',')})`);
+          this.streamingRouter!.setLightRgb(lightId, rgb);
+          res.json({ success: true, mode: 'streaming' });
+          return;
+        }
+
+        // If we can't convert to RGB, just acknowledge
+        res.json({ success: true, mode: 'streaming', note: 'No color change applied' });
+        return;
+      }
+
+      // === REST API MODE (streaming not active or light not in zone) ===
+      console.log(`[API] Using REST API for light ${lightId}`);
+
+      // Handle native Hue V2 dynamic effects
+      const nativeEffects = ['sparkle', 'fire', 'candle', 'prism', 'opal', 'glisten', 'underwater', 'cosmos', 'sunbeam', 'enchant'];
+      if (state.effect && nativeEffects.includes(state.effect)) {
+        try {
+          await this.customEffectsEngine.stopEffect(lightId);
+          await this.bridgeController.setDynamicEffect(lightId, state.effect, undefined, {
+            color: state.effectColor,
+            speed: state.effectSpeed,
+            colorTemperature: state.effectTemperature,
+          });
+          res.json({ success: true, mode: 'rest' });
           return;
         } catch (error) {
-          console.warn('Failed to set custom effect:', error);
+          console.warn('Failed to set dynamic effect:', error);
         }
+      }
+
+      // Handle signaling effects (flash, flash_color, alternating)
+      const signalingEffects = ['flash', 'flash_color', 'alternating'];
+      if (state.effect && signalingEffects.includes(state.effect)) {
+        try {
+          await this.customEffectsEngine.stopEffect(lightId);
+          const duration = state.effectDuration ?? 2000;
+
+          if (state.effect === 'flash') {
+            await this.bridgeController.setSignaling(lightId, 'on_off', duration);
+          } else if (state.effect === 'flash_color') {
+            const colors = state.effectColor ? [state.effectColor] : undefined;
+            await this.bridgeController.setSignaling(lightId, 'on_off_color', duration, colors);
+          } else if (state.effect === 'alternating') {
+            const colors: Array<{ x: number; y: number }> = [];
+            if (state.effectColor) colors.push(state.effectColor);
+            if (state.effectColor2) colors.push(state.effectColor2);
+            await this.bridgeController.setSignaling(lightId, 'alternating', duration, colors.length > 0 ? colors : undefined);
+          }
+          res.json({ success: true, mode: 'rest' });
+          return;
+        } catch (error) {
+          console.warn('Failed to set signaling effect:', error);
+        }
+      }
+
+      // Handle custom effects via CustomEffectsEngine (will log warning since streaming not active)
+      const customEffects = ['strobe', 'police', 'ambulance', 'lightning', 'color_flash', 'breathe_smooth', 'chase', 'desert', 'tv_flicker'];
+      const legacyToCustomMap: Record<string, CustomEffectType> = {
+        'pulse': 'breathe_smooth',
+        'breathe': 'breathe_smooth',
+        'color_cycle': 'chase',
+      };
+
+      const effectToUse = legacyToCustomMap[state.effect as string] || state.effect;
+
+      if (state.effect && (customEffects.includes(effectToUse as string) || legacyToCustomMap[state.effect as string])) {
+        const bpm = state.effectBpm ?? 120;
+        console.log(`[API] Starting custom effect ${effectToUse} on light ${lightId} at ${bpm} BPM (REST mode - will be choppy)`);
+
+        await this.customEffectsEngine.startEffect(lightId, effectToUse as CustomEffectType, {
+          speed: bpm,
+          color1: state.effectColor,
+          color2: state.effectColor2,
+          brightness: state.brightness ?? 254,
+          intensity: state.effectIntensity ?? 0.7,
+        });
+
+        res.json({ success: true, mode: 'rest', warning: 'Custom effects require streaming for smooth operation' });
+        return;
       }
 
       // Handle colorloop -> prism mapping
       if (state.effect === 'colorloop') {
         try {
-          console.log(`[API] Setting colorloop (prism effect) on light ${lightId}`);
           await this.bridgeController.setDynamicEffect(lightId, 'prism', undefined, {
             speed: state.effectSpeed ?? 0.5,
           });
-          res.json({ success: true });
+          res.json({ success: true, mode: 'rest' });
           return;
         } catch (error) {
           console.warn('Failed to set colorloop:', error);
@@ -992,14 +1080,10 @@ export class ApiServer {
       // Handle 'none' effect - stop any running effect
       if (state.effect === 'none') {
         try {
-          console.log(`[API] Stopping effects on light ${lightId}`);
-          // Stop custom effects engine
           await this.customEffectsEngine.stopEffect(lightId);
-          // Stop signaling
           await this.bridgeController.stopSignaling(lightId);
-          // Stop native dynamic effects
           await this.bridgeController.setDynamicEffect(lightId, 'no_effect', undefined, {});
-          res.json({ success: true });
+          res.json({ success: true, mode: 'rest' });
           return;
         } catch (error) {
           console.warn('Failed to stop effect:', error);
@@ -1009,44 +1093,115 @@ export class ApiServer {
       // Handle gradient if present
       if (state.gradient) {
         try {
-          // Stop any running custom effect before setting gradient
           await this.customEffectsEngine.stopEffect(lightId);
           await this.bridgeController.setGradient(lightId, state.gradient, state.gradientMode);
-          res.json({ success: true });
+          res.json({ success: true, mode: 'rest' });
           return;
         } catch (error) {
           console.warn('Failed to set gradient:', error);
         }
       }
 
-      // Use v2 API for color changes (better performance and instant transitions)
+      // Use v2 API for color changes
       if (state.hue !== undefined && state.saturation !== undefined) {
         try {
-          // Stop any running custom effect before setting color
           await this.customEffectsEngine.stopEffect(lightId);
           await this.bridgeController.setLightColorV2(lightId, state.hue, state.saturation, state.brightness);
 
-          // Handle on/off separately if needed
           if (state.on === false) {
             await this.bridgeController.setLightState(lightId, { on: false });
           }
 
-          res.json({ success: true });
+          res.json({ success: true, mode: 'rest' });
           return;
         } catch (error) {
-          console.warn('Failed to set color via v2 API, falling back to v1:', error);
-          // Fall through to standard control
+          console.warn('Failed to set color via v2 API:', error);
         }
       }
 
-      // Standard light state control (v1 API fallback)
-      // Stop any running custom effect before setting state
+      // Standard light state control
       await this.customEffectsEngine.stopEffect(lightId);
       await this.bridgeController.setLightState(lightId, state);
-      res.json({ success: true });
+      res.json({ success: true, mode: 'rest' });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }
+  }
+
+  /**
+   * Convert light state to RGB for streaming
+   */
+  private stateToRgb(state: any): [number, number, number] | null {
+    // If light is off, return black
+    if (state.on === false) {
+      return [0, 0, 0];
+    }
+
+    const brightness = state.brightness ?? 254;
+
+    // If we have hue and saturation, convert HSB to RGB
+    if (state.hue !== undefined && state.saturation !== undefined) {
+      const h = (state.hue / 65535) * 360;
+      const s = state.saturation / 254;
+      const v = brightness / 254;
+      return this.hsvToRgb(h, s, v);
+    }
+
+    // If we have XY color (effectColor), convert to RGB
+    if (state.effectColor) {
+      return this.xyBriToRgb(state.effectColor, brightness);
+    }
+
+    // If just brightness, return white at that brightness
+    if (brightness !== undefined) {
+      const b = Math.round((brightness / 254) * 255);
+      return [b, b, b];
+    }
+
+    return null;
+  }
+
+  /**
+   * Convert HSV to RGB
+   */
+  private hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+    const c = v * s;
+    const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+    const m = v - c;
+
+    let r = 0, g = 0, b = 0;
+    if (h < 60) { r = c; g = x; b = 0; }
+    else if (h < 120) { r = x; g = c; b = 0; }
+    else if (h < 180) { r = 0; g = c; b = x; }
+    else if (h < 240) { r = 0; g = x; b = c; }
+    else if (h < 300) { r = x; g = 0; b = c; }
+    else { r = c; g = 0; b = x; }
+
+    return [
+      Math.round((r + m) * 255),
+      Math.round((g + m) * 255),
+      Math.round((b + m) * 255),
+    ];
+  }
+
+  /**
+   * Convert XY + brightness to RGB
+   */
+  private xyBriToRgb(xy: { x: number; y: number }, brightness: number): [number, number, number] {
+    const z = 1.0 - xy.x - xy.y;
+    const Y = brightness / 254;
+    const X = (Y / xy.y) * xy.x;
+    const Z = (Y / xy.y) * z;
+
+    let r = X * 1.656492 - Y * 0.354851 - Z * 0.255038;
+    let g = -X * 0.707196 + Y * 1.655397 + Z * 0.036152;
+    let b = X * 0.051713 - Y * 0.121364 + Z * 1.011530;
+
+    r = Math.pow(Math.max(0, Math.min(1, r)), 0.45) * 255;
+    g = Math.pow(Math.max(0, Math.min(1, g)), 0.45) * 255;
+    b = Math.pow(Math.max(0, Math.min(1, b)), 0.45) * 255;
+
+    return [Math.round(r), Math.round(g), Math.round(b)];
   }
 
   private async previewScene(req: Request, res: Response): Promise<void> {
@@ -1165,6 +1320,273 @@ export class ApiServer {
       }
       await this.bluetoothController.testLightWithVerification(lightId);
       res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  // Entertainment/Streaming API handlers
+
+  private async getEntertainmentConfigurations(req: Request, res: Response): Promise<void> {
+    try {
+      const configs = await this.bridgeController.getEntertainmentConfigurations();
+      res.json({ configurations: configs });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  private async generateClientKey(req: Request, res: Response): Promise<void> {
+    try {
+      const { bridgeIp } = req.body;
+      const ip = bridgeIp || this.configManager.getConfig().bridgeIp;
+
+      console.log('[API] generateClientKey called with bridgeIp:', bridgeIp, 'using:', ip);
+
+      if (!ip) {
+        console.log('[API] No bridge IP available');
+        res.status(400).json({ error: 'Bridge IP is required. Connect to a bridge first.' });
+        return;
+      }
+
+      console.log(`[API] Generating client key for bridge at ${ip}...`);
+
+      const { username, clientKey } = await this.bridgeController.createUserWithClientKey(ip);
+      console.log('[API] Client key generated successfully');
+
+      // Save to config
+      this.configManager.updateConfig({ bridgeIp: ip, bridgeUsername: username });
+      this.configManager.updateStreamingConfig({ clientKey });
+      await this.configManager.save();
+
+      // Reconnect with new credentials
+      await this.bridgeController.connect(ip, username, clientKey);
+
+      res.json({ username, clientKey });
+    } catch (error: any) {
+      console.error('[API] generateClientKey error:', error.message);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  private async startStreaming(req: Request, res: Response): Promise<void> {
+    try {
+      const { entertainmentConfigId } = req.body;
+      const config = this.configManager.getConfig();
+
+      if (!config.bridgeIp || !config.bridgeUsername) {
+        res.status(400).json({ error: 'Bridge not connected' });
+        return;
+      }
+
+      const clientKey = config.streaming?.clientKey;
+      if (!clientKey) {
+        res.status(400).json({ error: 'Client key not configured. Generate one first.' });
+        return;
+      }
+
+      if (!entertainmentConfigId) {
+        res.status(400).json({ error: 'Entertainment configuration ID is required' });
+        return;
+      }
+
+      // Stop existing streaming if any
+      if (this.streamingService?.isStreaming()) {
+        await this.streamingService.stop();
+      }
+
+      // Get entertainment configuration to build channel mappings
+      const entertainmentConfigs = await this.bridgeController.getEntertainmentConfigurations();
+      const entertainmentConfig = entertainmentConfigs.find((c: any) => c.id === entertainmentConfigId);
+
+      if (!entertainmentConfig) {
+        res.status(404).json({ error: 'Entertainment configuration not found' });
+        return;
+      }
+
+      // Log the full entertainment config structure for debugging
+      console.log('[API] Entertainment config structure:', JSON.stringify({
+        id: entertainmentConfig.id,
+        name: entertainmentConfig.metadata?.name,
+        channels: entertainmentConfig.channels?.map((ch: any) => ({
+          channel_id: ch.channel_id,
+          members: ch.members?.map((m: any) => ({
+            service: m.service,
+          })),
+        })),
+        light_services: entertainmentConfig.light_services,
+        locations: entertainmentConfig.locations,
+      }, null, 2));
+
+      // Build channel mappings
+      // Note: entertainment configs reference "entertainment" resources, not "light" resources directly
+      // The light_services array contains the actual light IDs
+      const lightServiceIds = (entertainmentConfig.light_services || []).map((ls: any) => ls.rid);
+      console.log('[API] Light services in entertainment zone:', lightServiceIds);
+
+      // For gradient lights, multiple channels share the same entertainment resource ID
+      // but light_services only has one entry. We need to map entertainment IDs to light IDs.
+      const entertainmentToLightMap = new Map<string, string>();
+
+      // First pass: build mapping from entertainment resource IDs to light IDs
+      // Group channels by their entertainment resource ID to detect gradient lights
+      const channelsByEntertainment = new Map<string, number[]>();
+      for (const ch of entertainmentConfig.channels || []) {
+        const entertainmentRid = ch.members?.[0]?.service?.rid || '';
+        const rtype = ch.members?.[0]?.service?.rtype || 'unknown';
+        if (rtype === 'entertainment' && entertainmentRid) {
+          const existing = channelsByEntertainment.get(entertainmentRid) || [];
+          existing.push(ch.channel_id);
+          channelsByEntertainment.set(entertainmentRid, existing);
+        }
+      }
+
+      // For each unique entertainment resource, find its corresponding light
+      // If there are more channels than light_services, it's likely a gradient light
+      let lightServiceIndex = 0;
+      for (const [entertainmentRid, channelIds] of channelsByEntertainment) {
+        if (lightServiceIndex < lightServiceIds.length) {
+          const lightId = lightServiceIds[lightServiceIndex];
+          entertainmentToLightMap.set(entertainmentRid, lightId);
+          console.log(`[API] Entertainment ${entertainmentRid} (${channelIds.length} channels) -> Light ${lightId}`);
+          lightServiceIndex++;
+        }
+      }
+
+      this.channelMappings = (entertainmentConfig.channels || []).map((ch: any) => {
+        const entertainmentRid = ch.members?.[0]?.service?.rid || '';
+        const rtype = ch.members?.[0]?.service?.rtype || 'unknown';
+
+        // Use the entertainment-to-light mapping for consistent light IDs
+        let lightId = entertainmentRid;
+        if (rtype === 'entertainment') {
+          const mappedLightId = entertainmentToLightMap.get(entertainmentRid);
+          if (mappedLightId) {
+            lightId = mappedLightId;
+          }
+        }
+
+        return {
+          channelId: ch.channel_id,
+          lightId,
+          position: ch.position || { x: 0, y: 0, z: 0 },
+        };
+      });
+
+      console.log('[API] Entertainment zone channel mappings:');
+      this.channelMappings.forEach((m) => {
+        const lightName = this.bridgeController.getLightNameById(m.lightId);
+        console.log(`  Channel ${m.channelId} -> Light ${m.lightId} (${lightName || 'unknown'})`);
+      });
+
+      // Get application ID
+      const applicationId = this.bridgeController.getApplicationId();
+      if (!applicationId) {
+        res.status(500).json({ error: 'Could not get application ID' });
+        return;
+      }
+
+      // Create streaming service
+      this.streamingService = new HueStreamingService({
+        bridgeIp: config.bridgeIp,
+        username: config.bridgeUsername,
+        clientKey: clientKey,
+        entertainmentConfigId: entertainmentConfigId,
+        targetFps: 50,
+      });
+
+      this.streamingService.setApplicationId(applicationId);
+      this.streamingService.setChannelMappings(this.channelMappings);
+
+      // Set API callbacks
+      this.streamingService.setApiCallbacks(
+        async () => { await this.bridgeController.startEntertainmentStreaming(entertainmentConfigId); },
+        async () => { await this.bridgeController.stopEntertainmentStreaming(entertainmentConfigId); }
+      );
+
+      // Set up event handlers
+      this.streamingService.on('started', () => {
+        console.log('[API] Streaming started');
+        this.broadcast('streamingStarted', { entertainmentConfigId });
+      });
+      this.streamingService.on('stopped', (reason) => {
+        console.log(`[API] Streaming stopped: ${reason}`);
+        this.broadcast('streamingStopped', { reason });
+      });
+      this.streamingService.on('error', (err) => {
+        console.error('[API] Streaming error:', err.message);
+        this.broadcast('streamingError', { error: err.message });
+      });
+
+      // Create and configure streaming router
+      this.streamingRouter = new StreamingRouter();
+      this.streamingRouter.setStreamingService(this.streamingService);
+      this.streamingRouter.setChannelMappings(this.channelMappings);
+      // Provide V1→V2 ID lookup so effects using V1 IDs can find their channels
+      this.streamingRouter.setV1ToV2Lookup((v1Id) => this.bridgeController.getV2LightId(v1Id));
+
+      // Connect router to MappingEngine and CustomEffectsEngine for streaming
+      this.mappingEngine.setStreamingRouter(this.streamingRouter);
+      // Connect router to CustomEffectsEngine for smooth streaming animations
+      this.customEffectsEngine.setStreamingRouter(this.streamingRouter);
+
+      // Start streaming
+      await this.streamingService.start();
+
+      // Save config
+      this.configManager.updateStreamingConfig({
+        enabled: true,
+        entertainmentConfigId: entertainmentConfigId,
+      });
+      await this.configManager.save();
+
+      res.json({
+        success: true,
+        channels: this.channelMappings.length,
+        entertainmentConfigId
+      });
+    } catch (error: any) {
+      console.error('[API] Failed to start streaming:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  private async stopStreaming(req: Request, res: Response): Promise<void> {
+    try {
+      if (this.streamingService?.isStreaming()) {
+        await this.streamingService.stop();
+      }
+
+      // Disconnect streaming router (but keep CustomEffectsEngine connected for REST mode effects)
+      this.mappingEngine.setStreamingRouter(null);
+      this.customEffectsEngine.setStreamingRouter(null);
+      this.streamingRouter = null;
+      this.streamingService = null;
+
+      // Update config
+      this.configManager.updateStreamingConfig({ enabled: false });
+      await this.configManager.save();
+
+      res.json({ success: true });
+    } catch (error: any) {
+      res.status(500).json({ error: error.message });
+    }
+  }
+
+  private async getStreamingStatus(req: Request, res: Response): Promise<void> {
+    try {
+      const config = this.configManager.getConfig();
+      const isStreaming = this.streamingService?.isStreaming() ?? false;
+      const stats = this.streamingService?.getStats();
+
+      res.json({
+        enabled: config.streaming?.enabled ?? false,
+        streaming: isStreaming,
+        entertainmentConfigId: config.streaming?.entertainmentConfigId,
+        hasClientKey: !!config.streaming?.clientKey,
+        stats,
+        channels: this.channelMappings,
+      });
     } catch (error: any) {
       res.status(500).json({ error: error.message });
     }

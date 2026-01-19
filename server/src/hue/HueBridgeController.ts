@@ -22,7 +22,10 @@ export class HueBridgeController {
   private apiV2: HueApiV2 | null = null;
   private bridgeIp: string | null = null;
   private username: string | null = null;
+  private clientKey: string | null = null;
+  private applicationId: string | null = null;
   private lightIdMap: Map<string, string> = new Map(); // v1 ID -> v2 UUID
+  private lightNameMap: Map<string, string> = new Map(); // v2 UUID -> name
 
   /**
    * Discover Hue Bridges on the network using both cloud and mDNS
@@ -253,14 +256,161 @@ export class HueBridgeController {
   }
 
   /**
+   * Create a new user with client key for entertainment streaming
+   * User must press the link button on the bridge first
+   * Returns both username and clientKey needed for DTLS streaming
+   */
+  async createUserWithClientKey(
+    bridgeIp: string,
+    appName: string = 'hue-midi',
+    deviceName: string = 'midi-controller'
+  ): Promise<{ username: string; clientKey: string }> {
+    try {
+      // Use axios to directly call the API with generateclientkey=true
+      const axios = (await import('axios')).default;
+      const https = await import('https');
+
+      const response = await axios.post(
+        `https://${bridgeIp}/api`,
+        {
+          devicetype: `${appName}#${deviceName}`,
+          generateclientkey: true,
+        },
+        {
+          httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+        }
+      );
+
+      const result = response.data[0];
+      if (result.error) {
+        if (result.error.description?.includes('link button')) {
+          throw new Error('Please press the link button on your Hue Bridge and try again');
+        }
+        throw new Error(result.error.description || 'Failed to create user');
+      }
+
+      if (result.success) {
+        console.log('[HueBridgeController] Created user with client key');
+        return {
+          username: result.success.username,
+          clientKey: result.success.clientkey,
+        };
+      }
+
+      throw new Error('Unexpected response from bridge');
+    } catch (error: any) {
+      if (error.message?.includes('link button')) {
+        throw error;
+      }
+      throw new Error(`Failed to create user with client key: ${error.message}`);
+    }
+  }
+
+  /**
    * Connect to the Hue Bridge
    */
-  async connect(bridgeIp: string, username: string): Promise<void> {
+  async connect(bridgeIp: string, username: string, clientKey?: string): Promise<void> {
     this.bridgeIp = bridgeIp;
     this.username = username;
+    this.clientKey = clientKey || null;
     this.api = await hueApi.createLocal(bridgeIp).connect(username);
     this.apiV2 = new HueApiV2(bridgeIp, username);
     console.log('Connected to Hue Bridge (API v1 & v2)');
+
+    // Fetch application ID if we have a client key (needed for streaming)
+    if (clientKey) {
+      try {
+        this.applicationId = await this.apiV2.getApplicationId();
+        if (this.applicationId) {
+          console.log(`[HueBridgeController] Got application ID: ${this.applicationId}`);
+        }
+      } catch (error) {
+        console.warn('[HueBridgeController] Failed to get application ID:', error);
+      }
+    }
+  }
+
+  /**
+   * Get the stored client key
+   */
+  getClientKey(): string | null {
+    return this.clientKey;
+  }
+
+  /**
+   * Get the application ID (for DTLS PSK identity)
+   */
+  getApplicationId(): string | null {
+    return this.applicationId;
+  }
+
+  /**
+   * Get bridge IP
+   */
+  getBridgeIp(): string | null {
+    return this.bridgeIp;
+  }
+
+  /**
+   * Get username
+   */
+  getUsername(): string | null {
+    return this.username;
+  }
+
+  /**
+   * Get entertainment configurations
+   */
+  async getEntertainmentConfigurations(): Promise<any[]> {
+    if (!this.apiV2) {
+      throw new Error('Not connected to Hue Bridge');
+    }
+    return this.apiV2.getEntertainmentConfigurations();
+  }
+
+  /**
+   * Get a specific entertainment configuration
+   */
+  async getEntertainmentConfiguration(configId: string): Promise<any> {
+    if (!this.apiV2) {
+      throw new Error('Not connected to Hue Bridge');
+    }
+    return this.apiV2.getEntertainmentConfiguration(configId);
+  }
+
+  /**
+   * Start entertainment streaming on a configuration
+   * This activates the entertainment zone for DTLS streaming
+   */
+  async startEntertainmentStreaming(configId: string): Promise<boolean> {
+    if (!this.apiV2) {
+      throw new Error('Not connected to Hue Bridge');
+    }
+    return this.apiV2.startStreaming(configId);
+  }
+
+  /**
+   * Stop entertainment streaming on a configuration
+   */
+  async stopEntertainmentStreaming(configId: string): Promise<boolean> {
+    if (!this.apiV2) {
+      throw new Error('Not connected to Hue Bridge');
+    }
+    return this.apiV2.stopStreaming(configId);
+  }
+
+  /**
+   * Get the v2 UUID for a v1 light ID
+   */
+  getV2LightId(v1LightId: string): string | undefined {
+    return this.lightIdMap.get(v1LightId);
+  }
+
+  /**
+   * Get the light name for a v2 UUID
+   */
+  getLightNameById(v2LightId: string): string | undefined {
+    return this.lightNameMap.get(v2LightId);
   }
 
   /**
@@ -319,6 +469,8 @@ export class HueBridgeController {
           if (v2Light) {
             // Store the v1 -> v2 ID mapping
             this.lightIdMap.set(light.id.toString(), v2Light.id);
+            // Store the v2 -> name mapping
+            this.lightNameMap.set(v2Light.id, light.name);
             console.log(`Mapped light ${light.id} (${light.name}) -> ${v2Light.id}`);
 
             if (v2Light.effects?.effect_values) {
@@ -736,5 +888,8 @@ export class HueBridgeController {
     this.apiV2 = null;
     this.bridgeIp = null;
     this.username = null;
+    this.clientKey = null;
+    this.applicationId = null;
+    this.lightIdMap.clear();
   }
 }

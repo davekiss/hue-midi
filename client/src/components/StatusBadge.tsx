@@ -4,16 +4,23 @@ interface StatusBadgeProps {
 }
 
 export function StatusBadge({ status, children }: StatusBadgeProps) {
-  const colorClasses = {
-    connected: 'bg-green-500',
-    disconnected: 'bg-red-500',
-    pending: 'bg-yellow-500',
+  const statusStyles = {
+    connected: 'bg-[--color-success]/10 text-[--color-success] border-[--color-success]/20',
+    pending: 'bg-[--color-warning]/10 text-[--color-warning] border-[--color-warning]/20',
+    disconnected: 'bg-[--color-surface-3] text-[--color-text-muted] border-[--color-border]',
+  };
+
+  const dotStyles = {
+    connected: 'status-dot-connected',
+    pending: 'status-dot-pending',
+    disconnected: 'status-dot-disconnected',
   };
 
   return (
     <span
-      className={`inline-block px-4 py-1 rounded-full text-sm font-medium text-white ${colorClasses[status]}`}
+      className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-md border ${statusStyles[status]}`}
     >
+      <span className={`status-dot ${dotStyles[status]}`} />
       {children}
     </span>
   );

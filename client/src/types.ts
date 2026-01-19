@@ -234,16 +234,13 @@ export interface Scene {
 }
 
 export interface Config {
-  connectionMode: 'bluetooth' | 'bridge';
   bridgeIp?: string;
   bridgeUsername?: string;
   mappings: MidiMapping[];
   midiPortName?: string;
   scenes: Scene[];
-}
-
-export interface BluetoothStatus {
-  ready: boolean;
-  connected: boolean;
-  connectedLights: HueLight[];
+  streaming?: {
+    enabled: boolean;
+    clientKey?: string;
+  };
 }

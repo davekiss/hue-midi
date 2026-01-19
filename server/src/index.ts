@@ -51,8 +51,14 @@ class HueMidiApp {
       // Connect to Hue Bridge if configured
       if (config.connectionMode === 'bridge' && config.bridgeIp && config.bridgeUsername) {
         try {
-          await this.bridgeController.connect(config.bridgeIp, config.bridgeUsername);
+          // Include clientKey if available for streaming support
+          const clientKey = config.streaming?.clientKey;
+          await this.bridgeController.connect(config.bridgeIp, config.bridgeUsername, clientKey);
           console.log('✓ Connected to Hue Bridge\n');
+
+          if (clientKey) {
+            console.log('✓ Streaming credentials available\n');
+          }
         } catch (error) {
           console.warn('⚠ Could not connect to Hue Bridge. Please configure via web UI.\n');
         }

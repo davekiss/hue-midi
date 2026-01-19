@@ -243,6 +243,90 @@ export class HueApiV2 {
   }
 
   /**
+   * Get a specific entertainment configuration by ID
+   */
+  async getEntertainmentConfiguration(configId: string): Promise<any | null> {
+    try {
+      const response = await this.client.get(`/resource/entertainment_configuration/${configId}`);
+      return response.data.data?.[0] || null;
+    } catch (error: any) {
+      console.error('Failed to get entertainment config:', error.message);
+      return null;
+    }
+  }
+
+  /**
+   * Start streaming on an entertainment configuration
+   * This activates the entertainment zone for DTLS streaming
+   */
+  async startStreaming(configId: string): Promise<boolean> {
+    try {
+      console.log(`[HueApiV2] Sending start streaming request for config: ${configId}`);
+      const response = await this.client.put(`/resource/entertainment_configuration/${configId}`, {
+        action: 'start',
+      });
+      console.log(`[HueApiV2] Started streaming for entertainment config: ${configId}`, response.data);
+      return true;
+    } catch (error: any) {
+      console.error('[HueApiV2] Failed to start streaming:', error.message);
+      if (error.response) {
+        console.error('[HueApiV2] Response status:', error.response.status);
+        console.error('[HueApiV2] Response data:', JSON.stringify(error.response.data));
+      }
+      throw new Error(`Failed to start streaming: ${error.message}`);
+    }
+  }
+
+  /**
+   * Stop streaming on an entertainment configuration
+   */
+  async stopStreaming(configId: string): Promise<boolean> {
+    try {
+      await this.client.put(`/resource/entertainment_configuration/${configId}`, {
+        action: 'stop',
+      });
+      console.log(`[HueApiV2] Stopped streaming for entertainment config: ${configId}`);
+      return true;
+    } catch (error: any) {
+      console.error('Failed to stop streaming:', error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Get the application ID for DTLS PSK identity
+   * This is required for the streaming DTLS handshake
+   */
+  async getApplicationId(): Promise<string | null> {
+    try {
+      // The application ID is returned in the response header of /auth/v1
+      const authClient = axios.create({
+        baseURL: `https://${this.bridgeIp}`,
+        headers: {
+          'hue-application-key': this.username,
+        },
+        httpsAgent: new https.Agent({
+          rejectUnauthorized: false,
+        }),
+      });
+
+      const response = await authClient.get('/auth/v1');
+      const applicationId = response.headers['hue-application-id'];
+
+      if (applicationId) {
+        console.log(`[HueApiV2] Got application ID: ${applicationId}`);
+        return applicationId;
+      }
+
+      console.error('[HueApiV2] No application ID in response headers');
+      return null;
+    } catch (error: any) {
+      console.error('Failed to get application ID:', error.message);
+      return null;
+    }
+  }
+
+  /**
    * Get available effects for a specific light
    */
   async getLightEffects(lightId: string): Promise<string[]> {

@@ -1,14 +1,13 @@
 import type {
   Config,
-  HueLight,
   HueLightsResponse,
   MidiMapping,
-  BluetoothStatus,
   LightState,
   Scene,
   SceneLightState,
   SceneTransition,
 } from './types';
+import type { StreamingStatus, EntertainmentConfig } from './store';
 
 const API_BASE = '/api';
 
@@ -64,28 +63,16 @@ export const api = {
     getLights: () => apiCall<HueLightsResponse>('/hue/lights'),
   },
 
-  // Bluetooth
-  bluetooth: {
-    getStatus: () => apiCall<BluetoothStatus>('/hue/bluetooth/status'),
-    scan: (duration?: number, showAllDevices?: boolean) =>
-      apiCall<{ lights: HueLight[] }>('/hue/bluetooth/scan', 'POST', { duration, showAllDevices }),
-    connect: (lightId: string) => apiCall<{ success: boolean }>('/hue/bluetooth/connect', 'POST', { lightId }),
-    connectManual: (macAddress: string, name?: string) =>
-      apiCall<{ success: boolean }>('/hue/bluetooth/connect-manual', 'POST', { macAddress, name }),
-    disconnect: (lightId?: string) =>
-      apiCall<{ success: boolean }>('/hue/bluetooth/disconnect', 'POST', { lightId }),
-    getLights: () => apiCall<{ lights: HueLight[] }>('/hue/bluetooth/lights'),
-  },
-
   // Mappings
   mappings: {
     getAll: () => apiCall<{ mappings: MidiMapping[] }>('/mappings'),
     add: (mapping: MidiMapping) => apiCall<{ success: boolean }>('/mappings', 'POST', mapping),
-    remove: (channel: number, note: number, triggerType?: 'note' | 'cc', ccValue?: number) => {
+    remove: (channel: number, note: number, triggerType?: 'note' | 'cc', ccValue?: number, preset?: number) => {
       let url = `/mappings/${channel}/${note}`;
       const params = new URLSearchParams();
       if (triggerType) params.set('triggerType', triggerType);
       if (ccValue !== undefined) params.set('ccValue', ccValue.toString());
+      if (preset !== undefined) params.set('preset', preset.toString());
       if (params.toString()) url += `?${params.toString()}`;
       return apiCall<{ success: boolean }>(url, 'DELETE');
     },
@@ -108,5 +95,21 @@ export const api = {
     scenePreview: (scene: ScenePayload) =>
       apiCall<{ success: boolean; lights: string[] }>('/test/scene', 'POST', { scene }),
     stopScenePreview: () => apiCall<{ success: boolean }>('/test/scene/stop', 'POST'),
+  },
+
+  // Entertainment/Streaming
+  entertainment: {
+    getConfigurations: () =>
+      apiCall<{ configurations: EntertainmentConfig[] }>('/hue/entertainment/configurations'),
+    generateClientKey: (bridgeIp?: string) =>
+      apiCall<{ username: string; clientKey: string }>('/hue/entertainment/clientkey', 'POST', { bridgeIp }),
+    start: (entertainmentConfigId: string) =>
+      apiCall<{ success: boolean; channels: number; entertainmentConfigId: string }>(
+        '/hue/entertainment/start',
+        'POST',
+        { entertainmentConfigId }
+      ),
+    stop: () => apiCall<{ success: boolean }>('/hue/entertainment/stop', 'POST'),
+    getStatus: () => apiCall<StreamingStatus>('/hue/entertainment/status'),
   },
 };

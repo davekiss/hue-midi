@@ -1,22 +1,36 @@
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'danger';
+  variant?: 'primary' | 'secondary' | 'ghost' | 'danger';
+  size?: 'sm' | 'md' | 'lg';
   children: React.ReactNode;
 }
 
-export function Button({ variant = 'primary', children, className = '', ...props }: ButtonProps) {
-  const baseClasses =
-    'px-5 py-2.5 rounded border-none text-base font-medium cursor-pointer transition-all mr-2.5 mb-2.5';
+export function Button({
+  variant = 'primary',
+  size = 'md',
+  children,
+  className = '',
+  disabled,
+  ...props
+}: ButtonProps) {
+  const baseClasses = 'btn';
 
   const variantClasses = {
-    primary: 'bg-[#667eea] text-white hover:bg-[#764ba2] hover:-translate-y-0.5 hover:shadow-[0_4px_12px_rgba(102,126,234,0.4)]',
-    danger: 'bg-[#ef4444] text-white hover:bg-[#dc2626]',
+    primary: 'btn-primary',
+    secondary: 'btn-secondary',
+    ghost: 'btn-ghost',
+    danger: 'btn-danger',
   };
 
-  const disabledClasses = 'disabled:bg-[#555] disabled:cursor-not-allowed disabled:transform-none';
+  const sizeClasses = {
+    sm: 'text-xs px-2.5 py-1.5',
+    md: 'text-sm px-4 py-2',
+    lg: 'text-base px-5 py-2.5',
+  };
 
   return (
     <button
-      className={`${baseClasses} ${variantClasses[variant]} ${disabledClasses} ${className}`}
+      className={`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
+      disabled={disabled}
       {...props}
     >
       {children}

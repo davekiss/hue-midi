@@ -10,26 +10,56 @@ import { SceneSelect } from './SceneSelect';
 // Native Hue V2 effects (handled by the bridge)
 const NATIVE_EFFECTS = ['sparkle', 'fire', 'candle', 'prism', 'opal', 'glisten', 'underwater', 'cosmos', 'sunbeam', 'enchant'] as const;
 
-// Custom effects (our CustomEffectsEngine with BPM control)
+// Streaming-compatible effect presets (our preset system - these work great with Entertainment API)
+const STREAMING_PRESETS = [
+  // Nature
+  'candle', 'fire', 'fireplace', 'aurora', 'ocean', 'underwater', 'lava',
+  'thunderstorm', 'rain', 'forest', 'meadow', 'starfield', 'galaxy',
+  // Urban
+  'traffic', 'highway',
+  // Ambient
+  'sparkle', 'prism', 'colorloop', 'opal', 'glisten',
+  'tv_ballast', 'fluorescent', 'sparse', 'scattered',
+  'cozy_window', 'party_window', 'evening_window',
+  // Chase
+  'marquee', 'marquee_alternate', 'theater',
+  'rainbow_chase', 'two_color_chase', 'wave', 'bounce', 'comet', 'pulse',
+] as const;
+
+// Custom effects (our CustomEffectsEngine with BPM control - legacy)
 const CUSTOM_EFFECTS = ['strobe', 'police', 'ambulance', 'lightning', 'color_flash', 'breathe_smooth', 'chase', 'desert', 'tv_flicker'] as const;
 
 // Effects that support color parameter
 const EFFECTS_WITH_COLOR_PARAMETER = new Set<string>([
   ...NATIVE_EFFECTS,
-  'color_flash', 'police', 'ambulance', 'breathe_smooth', 'chase'
+  'color_flash', 'police', 'ambulance', 'breathe_smooth', 'chase',
+  'two_color_chase', 'wave', 'comet', 'pulse',
+  'sparse', 'scattered', 'glisten',
 ]);
 
-// Effects that support speed parameter (native Hue 0-1)
-const EFFECTS_WITH_SPEED_PARAMETER = new Set<string>([...NATIVE_EFFECTS]);
+// Effects that support speed parameter (native Hue 0-1 and streaming presets)
+const EFFECTS_WITH_SPEED_PARAMETER = new Set<string>([
+  ...NATIVE_EFFECTS,
+  ...STREAMING_PRESETS,
+]);
 
-// Effects that support BPM parameter (our custom effects)
+// Effects that support BPM parameter (legacy custom effects)
 const EFFECTS_WITH_BPM_PARAMETER = new Set<string>([...CUSTOM_EFFECTS]);
 
 // Effects that support a second color
-const EFFECTS_WITH_TWO_COLORS = new Set<string>(['color_flash', 'police', 'ambulance', 'chase']);
+const EFFECTS_WITH_TWO_COLORS = new Set<string>(['color_flash', 'police', 'ambulance', 'chase', 'two_color_chase']);
 
 // Effects that support intensity parameter
-const EFFECTS_WITH_INTENSITY_PARAMETER = new Set<string>(['lightning', 'tv_flicker']);
+const EFFECTS_WITH_INTENSITY_PARAMETER = new Set<string>([
+  'lightning', 'tv_flicker',
+  // Streaming presets also use intensity for effect strength
+  'aurora', 'lava', 'ocean', 'traffic', 'highway', 'rainbow_chase', 'wave',
+  'thunderstorm', 'rain', 'forest', 'meadow', 'starfield', 'galaxy',
+  'candle', 'fire', 'fireplace', 'sparkle', 'opal', 'glisten',
+  'tv_ballast', 'fluorescent', 'sparse', 'scattered',
+  'cozy_window', 'party_window', 'evening_window',
+  'marquee', 'marquee_alternate', 'theater',
+]);
 
 interface MappingFormProps {
   lights: HueLight[];
@@ -39,6 +69,7 @@ interface MappingFormProps {
   onScenesRefresh: () => Promise<void>;
   existingMapping?: MidiMapping;  // Optional existing mapping for editing
   presetContext?: number | null;  // If set, auto-assign this preset to new mappings
+  template?: Partial<MidiMapping>;  // Optional template to pre-fill values (from MIDI Learn)
 }
 
 // Convert XY color to hex (moved outside component to avoid TDZ issues)
@@ -81,20 +112,24 @@ const HELIX_CC_PRESETS = [
   { label: 'Snapshot 8', cc: 69, value: 7 },
 ] as const;
 
-export function MappingForm({ lights, scenes, onSubmit, onClose, onScenesRefresh, existingMapping, presetContext }: MappingFormProps) {
+export function MappingForm({ lights, scenes, onSubmit, onClose, onScenesRefresh, existingMapping, presetContext, template }: MappingFormProps) {
+  // Use template values if provided, otherwise fall back to existingMapping or defaults
+  const source = existingMapping || template;
+
   const [name, setName] = useState(existingMapping?.name || '');
-  const [triggerType, setTriggerType] = useState<'note' | 'cc'>(existingMapping?.triggerType || 'note');
-  const [midiChannel, setMidiChannel] = useState(existingMapping?.midiChannel ?? 0);
+  const [triggerType, setTriggerType] = useState<'note' | 'cc'>(source?.triggerType || 'note');
+  const [midiChannel, setMidiChannel] = useState(source?.midiChannel ?? 0);
   const [midiNote, setMidiNote] = useState(existingMapping?.midiNote ?? 60);
   // CC-specific state
-  const [ccNumber, setCcNumber] = useState(existingMapping?.ccNumber ?? 69); // Default to Helix snapshot CC
-  const [ccValue, setCcValue] = useState<number | undefined>(existingMapping?.ccValue);
-  const [ccValueMode, setCcValueMode] = useState<'specific' | 'any'>(existingMapping?.ccValue !== undefined ? 'specific' : 'any');
+  const [ccNumber, setCcNumber] = useState(source?.ccNumber ?? 69); // Default to Helix snapshot CC
+  const [ccValue, setCcValue] = useState<number | undefined>(source?.ccValue);
+  const [ccValueMode, setCcValueMode] = useState<'specific' | 'any'>(source?.ccValue !== undefined ? 'specific' : 'any');
   // Preset filtering (for per-song mappings)
-  // If there's a preset context from the UI, use it automatically
+  // If there's a preset context from the UI or template, use it automatically
   const hasPresetContext = presetContext !== null && presetContext !== undefined;
-  const [usePresetFilter, setUsePresetFilter] = useState(existingMapping?.preset !== undefined || hasPresetContext);
-  const [preset, setPreset] = useState<number | undefined>(existingMapping?.preset ?? (hasPresetContext ? presetContext : undefined));
+  const hasTemplatePreset = template?.preset !== undefined;
+  const [usePresetFilter, setUsePresetFilter] = useState(existingMapping?.preset !== undefined || hasPresetContext || hasTemplatePreset);
+  const [preset, setPreset] = useState<number | undefined>(existingMapping?.preset ?? template?.preset ?? (hasPresetContext ? presetContext : undefined));
   const [lightId, setLightId] = useState(existingMapping?.lightId || lights[0]?.id || '');
   const [sceneId, setSceneId] = useState<string | undefined>(existingMapping?.sceneId);
   const [actionType, setActionType] = useState<'color' | 'brightness' | 'toggle' | 'effect' | 'gradient'>(existingMapping?.action.type || 'color');
@@ -1327,13 +1362,54 @@ export function MappingForm({ lights, scenes, onSubmit, onClose, onScenesRefresh
               </optgroup>
             )}
 
+            {/* Streaming Presets - work great with Entertainment API */}
+            <optgroup label="🎬 Nature Presets">
+              <option value="aurora">Aurora (Northern Lights)</option>
+              <option value="lava">Lava (Molten Flow)</option>
+              <option value="ocean">Ocean (Underwater Waves)</option>
+              <option value="thunderstorm">Thunderstorm (Lightning)</option>
+              <option value="rain">Rain (Gentle Clouds)</option>
+              <option value="forest">Forest (Dappled Light)</option>
+              <option value="meadow">Meadow (Sunlit Grass)</option>
+              <option value="starfield">Starfield (Twinkling Stars)</option>
+              <option value="galaxy">Galaxy (Cosmic Nebula)</option>
+            </optgroup>
+
+            <optgroup label="🏠 Window Views">
+              <option value="cozy_window">Cozy Window (Warm Interior)</option>
+              <option value="evening_window">Evening Window (Quiet Lamp)</option>
+              <option value="party_window">Party Window (Colorful)</option>
+            </optgroup>
+
+            <optgroup label="💡 Ambient">
+              <option value="tv_ballast">TV Ballast (CRT Warmup)</option>
+              <option value="fluorescent">Fluorescent (Tube Light)</option>
+              <option value="sparse">Sparse (Scattered Points)</option>
+              <option value="scattered">Scattered (Colorful Points)</option>
+              <option value="traffic">Traffic (Night Drive)</option>
+              <option value="highway">Highway (Fast Traffic)</option>
+            </optgroup>
+
+            <optgroup label="🎪 Chase Effects">
+              <option value="marquee">Marquee (Theater Lights)</option>
+              <option value="marquee_alternate">Marquee Alternate</option>
+              <option value="theater">Theater (Slow Elegant)</option>
+              <option value="rainbow_chase">Rainbow Chase</option>
+              <option value="comet">Comet (Trailing Fade)</option>
+              <option value="wave">Wave (Flowing Pattern)</option>
+              <option value="bounce">Bounce (Back & Forth)</option>
+              <option value="pulse">Pulse (Rhythmic)</option>
+              <option value="colorloop">Color Loop</option>
+              <option value="two_color_chase">Two Color Chase</option>
+            </optgroup>
+
             {/* Stop/None */}
             <optgroup label="⏹️ Control">
               <option value="none">No Effect (Stop)</option>
             </optgroup>
 
-            {/* Custom Effects - at bottom, experimental */}
-            <optgroup label="🧪 Custom Effects (Beta)">
+            {/* Custom Effects - legacy BPM-based */}
+            <optgroup label="🧪 Custom Effects (BPM)">
               <option value="strobe">Strobe (Rapid On/Off)</option>
               <option value="police">Police Lights (Red/Blue)</option>
               <option value="ambulance">Ambulance (Red/White)</option>
@@ -1348,6 +1424,39 @@ export function MappingForm({ lights, scenes, onSubmit, onClose, onScenesRefresh
 
           {/* Effect description */}
           <p className="text-xs text-[#777] mt-2">
+            {/* Streaming presets */}
+            {effect === 'aurora' && '🌌 Northern lights with flowing green/teal/purple bands'}
+            {effect === 'lava' && '🌋 Molten lava with cooling zones and bubbling hotspots'}
+            {effect === 'ocean' && '🌊 Deep underwater waves with traveling light bursts'}
+            {effect === 'thunderstorm' && '⛈️ Dark storm clouds with dramatic lightning flashes'}
+            {effect === 'rain' && '🌧️ Gentle rain with soft blue-gray clouds'}
+            {effect === 'forest' && '🌲 Peaceful canopy with dappled sunlight filtering through'}
+            {effect === 'meadow' && '🌻 Sunlit meadow with gentle grass sway'}
+            {effect === 'starfield' && '✨ Twinkling stars with occasional shooting stars'}
+            {effect === 'galaxy' && '🌌 Colorful cosmic nebula with purple/blue/pink hues'}
+            {effect === 'traffic' && '🚗 Night traffic - red taillights and white headlights'}
+            {effect === 'highway' && '🛣️ Fast highway traffic streaks'}
+            {effect === 'rainbow_chase' && '🌈 Rainbow colors cycling across gradient lights'}
+            {effect === 'comet' && '☄️ Bright head with warm fading trail'}
+            {effect === 'wave' && '🌊 Flowing wave brightness pattern'}
+            {effect === 'bounce' && '↔️ Colors bouncing back and forth'}
+            {effect === 'pulse' && '💓 Rhythmic brightness pulsing'}
+            {effect === 'colorloop' && '🔄 Classic smooth color cycling'}
+            {effect === 'two_color_chase' && '🎨 Alternating between two colors'}
+            {/* Window views */}
+            {effect === 'cozy_window' && '🏠 Warm living room light with TV glow and passing shadows'}
+            {effect === 'evening_window' && '🌙 Quiet evening lamp light through window'}
+            {effect === 'party_window' && '🎉 Colorful party lights seen through window'}
+            {/* Ambient effects */}
+            {effect === 'tv_ballast' && '📺 Old CRT TV warming up with characteristic flicker'}
+            {effect === 'fluorescent' && '💡 Fluorescent tube light with subtle buzz'}
+            {effect === 'sparse' && '✨ Scattered light points with darkness between'}
+            {effect === 'scattered' && '🌈 Colorful scattered light points'}
+            {/* Chase effects */}
+            {effect === 'marquee' && '🎭 Classic theater marquee lights chasing'}
+            {effect === 'marquee_alternate' && '💡 Alternating marquee bulbs blinking'}
+            {effect === 'theater' && '🎬 Elegant slow-moving theater lights'}
+            {/* Legacy custom effects */}
             {effect === 'strobe' && '⚡ Rapid on/off strobe at configurable speed'}
             {effect === 'police' && '🚔 Alternating red/blue police lights'}
             {effect === 'ambulance' && '🚑 Alternating red/white ambulance lights'}
@@ -1357,8 +1466,10 @@ export function MappingForm({ lights, scenes, onSubmit, onClose, onScenesRefresh
             {effect === 'chase' && '🔄 Cycle through colors in sequence'}
             {effect === 'desert' && '🏜️ Warm dusty colors drifting like desert heat shimmer'}
             {effect === 'tv_flicker' && '📺 Cool blue TV glow flickering through window blinds'}
+            {/* Native Hue effects */}
             {effect === 'sparkle' && '✨ Twinkling sparkle effect'}
             {effect === 'fire' && '🔥 Flickering fire/flame simulation'}
+            {effect === 'fireplace' && '🔥 Cozy fireplace flames'}
             {effect === 'candle' && '🕯️ Gentle candle flicker'}
             {effect === 'prism' && '🌈 Smooth color cycling through spectrum'}
             {effect === 'opal' && '💎 Subtle opal shimmer'}

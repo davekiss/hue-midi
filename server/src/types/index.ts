@@ -241,6 +241,12 @@ export interface Scene {
   metadata?: Record<string, unknown>;
 }
 
+export interface StreamingConfig {
+  enabled: boolean;
+  entertainmentConfigId?: string;
+  clientKey?: string;
+}
+
 export interface Config {
   connectionMode: 'bluetooth' | 'bridge';
   bridgeIp?: string;
@@ -248,6 +254,7 @@ export interface Config {
   mappings: MidiMapping[];
   midiPortName?: string;
   scenes: Scene[];
+  streaming?: StreamingConfig;
 }
 
 export type ConnectionMode = 'bluetooth' | 'bridge';

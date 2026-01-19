@@ -3,6 +3,8 @@ import { MidiMessage, MidiCCMessage, MidiPCMessage, MidiMapping, LightState, Mid
 import { HueBridgeController } from '../hue/HueBridgeController';
 import { HueBluetoothController } from '../hue/HueBluetoothController';
 import { SpringAnimator, AnimationTarget } from '../animation/SpringAnimator';
+import { StreamingRouter } from '../streaming/StreamingRouter';
+import { CustomEffectsEngine } from '../effects/CustomEffectsEngine';
 
 interface AppliedSceneState {
   targetId: string;
@@ -38,6 +40,8 @@ export class MappingEngine extends EventEmitter {
   private currentPreset: number | null = null;  // Current MIDI Program/Preset number
   private lastCCMessages: Map<string, { value: number; timestamp: number }> = new Map();  // CC debounce
   private static readonly CC_DEBOUNCE_MS = 50;  // Ignore duplicate CCs within 50ms
+  private streamingRouter: StreamingRouter | null = null;
+  private customEffectsEngine: CustomEffectsEngine | null = null;
 
   // Native Hue V2 effects (handled by bridge via effects_v2 API)
   private static readonly NATIVE_EFFECTS: ReadonlyArray<HueNativeEffect> = [
@@ -60,7 +64,7 @@ export class MappingEngine extends EventEmitter {
     'alternating',
   ];
 
-  // Custom effects (implemented by CustomEffectsEngine)
+  // Custom effects (implemented by CustomEffectsEngine - BPM-based)
   private static readonly CUSTOM_EFFECTS: ReadonlyArray<CustomEffect> = [
     'strobe',
     'police',
@@ -69,6 +73,8 @@ export class MappingEngine extends EventEmitter {
     'color_flash',
     'breathe_smooth',
     'chase',
+    'desert',
+    'tv_flicker',
   ];
 
   private static readonly NATIVE_EFFECTS_SET = new Set<string>(MappingEngine.NATIVE_EFFECTS);
@@ -96,6 +102,27 @@ export class MappingEngine extends EventEmitter {
   }
 
   /**
+   * Set the streaming router for Entertainment API streaming
+   */
+  setStreamingRouter(router: StreamingRouter | null): void {
+    this.streamingRouter = router;
+  }
+
+  /**
+   * Get the streaming router
+   */
+  getStreamingRouter(): StreamingRouter | null {
+    return this.streamingRouter;
+  }
+
+  /**
+   * Set the custom effects engine for streaming effects
+   */
+  setCustomEffectsEngine(engine: CustomEffectsEngine | null): void {
+    this.customEffectsEngine = engine;
+  }
+
+  /**
    * Add a MIDI to light mapping
    */
   addMapping(mapping: MidiMapping): void {
@@ -104,21 +131,34 @@ export class MappingEngine extends EventEmitter {
       const key = this.getCCMappingKey(mapping.ccNumber ?? 0, mapping.midiChannel);
       const existing = this.ccMappings.get(key) || [];
 
-      // Remove any existing mapping with same ccValue (if specified)
+      // Remove any existing mapping with same ccValue AND preset (if specified)
+      // Mappings with different presets are kept (they're distinct mappings)
       const filtered = existing.filter(m => {
+        // Different preset = different mapping, keep it
+        if (m.preset !== mapping.preset) return true;
+        // Same preset - check ccValue match
         if (mapping.ccValue !== undefined && m.ccValue !== undefined) {
           return m.ccValue !== mapping.ccValue;
         }
-        // For range-based or any-value mappings, check overlap
-        return false; // For now, replace existing
+        // For range-based or any-value mappings with same preset, replace
+        return false;
       });
 
       filtered.push(mapping);
       this.ccMappings.set(key, filtered);
     } else {
-      // Note mapping (default)
+      // Note mapping - use key that includes preset for uniqueness
       const key = this.getMappingKey(mapping.midiNote, mapping.midiChannel);
-      this.mappings.set(key, mapping);
+      // For note mappings, we need to handle preset-scoped mappings
+      // Store in a way that allows multiple presets for same note
+      const existingMapping = this.mappings.get(key);
+      if (existingMapping && existingMapping.preset !== mapping.preset) {
+        // Different preset - need to store both. Use a modified key.
+        const presetKey = `${key}:preset:${mapping.preset ?? 'global'}`;
+        this.mappings.set(presetKey, mapping);
+      } else {
+        this.mappings.set(key, mapping);
+      }
     }
     this.emit('mappingAdded', mapping);
   }
@@ -126,33 +166,46 @@ export class MappingEngine extends EventEmitter {
   /**
    * Remove a mapping
    */
-  removeMapping(note: number, channel: number, triggerType?: 'note' | 'cc', ccValue?: number): void {
+  removeMapping(note: number, channel: number, triggerType?: 'note' | 'cc', ccValue?: number, preset?: number): void {
     if (triggerType === 'cc') {
       // Remove CC mapping
       const key = this.getCCMappingKey(note, channel); // note is ccNumber for CC mappings
       const existing = this.ccMappings.get(key);
       if (existing) {
-        if (ccValue !== undefined) {
-          // Remove specific value mapping
-          const filtered = existing.filter(m => m.ccValue !== ccValue);
-          if (filtered.length > 0) {
-            this.ccMappings.set(key, filtered);
-          } else {
-            this.ccMappings.delete(key);
-          }
+        // Filter by both ccValue and preset
+        const filtered = existing.filter(m => {
+          // If preset is specified, only remove mappings with matching preset
+          if (preset !== undefined && m.preset !== preset) return true;
+          // If ccValue is specified, only remove mappings with matching ccValue
+          if (ccValue !== undefined && m.ccValue !== ccValue) return true;
+          // This mapping matches - remove it
+          return false;
+        });
+        if (filtered.length > 0) {
+          this.ccMappings.set(key, filtered);
         } else {
-          // Remove all mappings for this CC
           this.ccMappings.delete(key);
         }
-        this.emit('mappingRemoved', { channel, ccNumber: note, ccValue });
+        this.emit('mappingRemoved', { channel, ccNumber: note, ccValue, preset });
       }
     } else {
-      // Remove note mapping
-      const key = this.getMappingKey(note, channel);
-      const mapping = this.mappings.get(key);
-      if (mapping) {
-        this.mappings.delete(key);
-        this.emit('mappingRemoved', mapping);
+      // Remove note mapping - check both regular and preset-scoped keys
+      const baseKey = this.getMappingKey(note, channel);
+      if (preset !== undefined) {
+        // Remove preset-scoped mapping
+        const presetKey = `${baseKey}:preset:${preset}`;
+        const mapping = this.mappings.get(presetKey);
+        if (mapping) {
+          this.mappings.delete(presetKey);
+          this.emit('mappingRemoved', mapping);
+        }
+      } else {
+        // Remove global mapping (no preset)
+        const mapping = this.mappings.get(baseKey);
+        if (mapping) {
+          this.mappings.delete(baseKey);
+          this.emit('mappingRemoved', mapping);
+        }
       }
     }
   }
@@ -501,9 +554,19 @@ export class MappingEngine extends EventEmitter {
             state.effectColor2 = action.effectColor2;
           }
 
-          // Effect speed (0-1)
+          // Effect speed (0-1 for native Hue effects)
           if (action.effectSpeed !== undefined) {
             state.effectSpeed = action.effectSpeed;
+          }
+
+          // Effect BPM (for custom BPM-based effects like strobe, tv_flicker, etc.)
+          if (action.effectBpm !== undefined) {
+            state.effectBpm = action.effectBpm;
+          }
+
+          // Effect intensity (for effects that support it)
+          if (action.effectIntensity !== undefined) {
+            state.effectIntensity = action.effectIntensity;
           }
 
           // Effect duration for signaling effects
@@ -650,10 +713,82 @@ export class MappingEngine extends EventEmitter {
     return Math.round((velocity / 127) * 254);
   }
 
+  // Streaming presets that CustomEffectsEngine supports
+  private static readonly STREAMING_PRESETS = new Set([
+    'candle', 'fire', 'fireplace', 'aurora', 'ocean', 'underwater', 'lava',
+    'thunderstorm', 'rain', 'forest', 'meadow', 'starfield', 'galaxy',
+    'traffic', 'highway',
+    'sparkle', 'prism', 'colorloop', 'opal', 'glisten',
+    'tv_ballast', 'fluorescent', 'sparse', 'scattered',
+    'cozy_window', 'party_window', 'evening_window',
+    'marquee', 'marquee_alternate', 'theater',
+    'rainbow_chase', 'two_color_chase', 'wave', 'wave_chase', 'bounce', 'bounce_chase', 'comet', 'comet_chase', 'pulse',
+  ]);
+
   /**
    * Set light state using the appropriate controller
    */
   private async setLightState(lightId: string, state: LightState): Promise<void> {
+    // Check if streaming is available for this light
+    if (this.streamingRouter?.isStreaming() && this.streamingRouter.isLightInZone(lightId)) {
+      // Use streaming for lights in the entertainment zone
+
+      // Handle streaming effects via CustomEffectsEngine
+      if (state.effect && this.customEffectsEngine && MappingEngine.STREAMING_PRESETS.has(state.effect)) {
+        // Stop any existing effect first
+        await this.customEffectsEngine.stopEffect(lightId);
+
+        // Start the streaming preset effect
+        const started = await this.customEffectsEngine.startPresetEffect(lightId, state.effect, {
+          speed: state.effectSpeed ? Math.round(state.effectSpeed * 100) : 50,
+          color1: state.effectColor,
+          color2: state.effectColor2,
+          brightness: state.brightness ?? 254,
+          intensity: state.effectIntensity ?? 0.7,
+        });
+
+        if (started) {
+          console.log(`[MappingEngine] Started streaming effect "${state.effect}" on light ${lightId}`);
+          return;
+        }
+        // Fall through to REST API if preset not found
+        console.log(`[MappingEngine] Streaming effect "${state.effect}" not available, falling back to REST`);
+      }
+
+      // Handle custom BPM-based effects via CustomEffectsEngine (strobe, police, etc.)
+      if (state.effect && this.customEffectsEngine && MappingEngine.CUSTOM_EFFECTS_SET.has(state.effect)) {
+        // Stop any existing effect first
+        await this.customEffectsEngine.stopEffect(lightId);
+
+        // Start the custom BPM-based effect
+        await this.customEffectsEngine.startEffect(
+          lightId,
+          state.effect as any, // CustomEffectType
+          {
+            speed: state.effectBpm ?? 120, // BPM for custom effects
+            color1: state.effectColor,
+            color2: state.effectColor2,
+            brightness: state.brightness ?? 254,
+            intensity: state.effectIntensity ?? 0.7,
+          }
+        );
+        console.log(`[MappingEngine] Started custom effect "${state.effect}" on light ${lightId} at ${state.effectBpm ?? 120} BPM`);
+        return;
+      }
+
+      // Handle off state - stop any running effect
+      if (state.on === false && this.customEffectsEngine) {
+        await this.customEffectsEngine.stopEffect(lightId);
+      }
+
+      // Use streaming for simple color/brightness changes (not effects)
+      if (!state.effect && !state.gradient) {
+        await this.streamingRouter.setLightState(lightId, state);
+        return;
+      }
+      // Unsupported effects and gradients fall through to REST API
+    }
+
     // Check if this light is connected via Bluetooth first
     const isBluetoothLight = this.bluetoothController?.isLightConnected(lightId) || false;
 
@@ -707,12 +842,13 @@ export class MappingEngine extends EventEmitter {
         }
       }
 
-      // Handle custom effects (pulse, strobe, color_cycle, breathe)
+      // Handle custom effects via CustomEffectsEngine (works even without streaming, just choppier)
       if (effect && MappingEngine.CUSTOM_EFFECTS_SET.has(effect)) {
         try {
           if (effect === 'pulse') {
             // Use the Hue "breathe" alert for a single pulse
             await this.bridgeController.triggerBreathe(lightId);
+            return;
           } else if (effect === 'color_cycle' || effect === 'colorloop') {
             // Map colorloop/color_cycle to prism effect (closest equivalent in V2)
             await this.bridgeController.setDynamicEffect(
@@ -721,15 +857,31 @@ export class MappingEngine extends EventEmitter {
               undefined,
               { speed: state.effectSpeed ?? 0.5 }
             );
-          } else if (effect === 'strobe') {
-            // Rapid on/off using signaling with short duration
-            const duration = state.effectDuration ?? 5000;
-            await this.bridgeController.setSignaling(lightId, 'on_off', duration);
+            return;
           } else if (effect === 'breathe') {
             // Slow breathing effect - trigger multiple breathe cycles
             await this.bridgeController.triggerBreathe(lightId);
+            return;
           }
-          return;
+
+          // All other custom effects (strobe, police, ambulance, lightning, color_flash,
+          // breathe_smooth, chase, desert, tv_flicker) use CustomEffectsEngine
+          if (this.customEffectsEngine) {
+            await this.customEffectsEngine.stopEffect(lightId);
+            await this.customEffectsEngine.startEffect(
+              lightId,
+              effect as any,
+              {
+                speed: state.effectBpm ?? 120,
+                color1: state.effectColor,
+                color2: state.effectColor2,
+                brightness: state.brightness ?? 254,
+                intensity: state.effectIntensity ?? 0.7,
+              }
+            );
+            console.log(`[MappingEngine] Started custom effect "${effect}" on light ${lightId} at ${state.effectBpm ?? 120} BPM (REST mode)`);
+            return;
+          }
         } catch (error) {
           console.warn('Failed to set custom effect:', error);
         }

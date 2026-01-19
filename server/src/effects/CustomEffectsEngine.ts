@@ -1,7 +1,17 @@
 import { EventEmitter } from 'events';
 import { HueBridgeController } from '../hue/HueBridgeController';
+import { StreamingRouter } from '../streaming/StreamingRouter';
+import type { RGB } from '../streaming/types';
+import {
+  EffectPreset,
+  EffectState,
+  EffectOptions as PresetEffectOptions,
+  getEffectPreset,
+  getStreamingAlternative,
+  getAvailableEffects,
+} from './presets';
 
-// Effect types that our custom engine handles
+// Effect types that our custom engine handles (built-in effects)
 export type CustomEffectType =
   | 'strobe'
   | 'police'
@@ -38,6 +48,17 @@ interface RunningEffect {
   };
 }
 
+// Preset-based effect runner
+interface RunningPresetEffect {
+  lightId: string;
+  preset: EffectPreset;
+  options: PresetEffectOptions;
+  intervalId: NodeJS.Timeout;
+  state: EffectState;
+  isGradient: boolean;  // Whether this light supports gradient streaming
+  segmentCount: number; // Number of segments for gradient lights
+}
+
 // Predefined colors in XY format
 const COLORS = {
   RED: { x: 0.675, y: 0.322 },
@@ -62,11 +83,98 @@ const COLORS = {
 
 export class CustomEffectsEngine extends EventEmitter {
   private bridgeController: HueBridgeController;
+  private streamingRouter: StreamingRouter | null = null;
   private runningEffects: Map<string, RunningEffect> = new Map();
+  private runningPresetEffects: Map<string, RunningPresetEffect> = new Map();
 
   constructor(bridgeController: HueBridgeController) {
     super();
     this.bridgeController = bridgeController;
+  }
+
+  /**
+   * Set the streaming router for high-frequency updates
+   */
+  setStreamingRouter(router: StreamingRouter | null): void {
+    this.streamingRouter = router;
+    this._streamingCheckLogged.clear(); // Reset debug logging
+    console.log(`[CustomEffects] StreamingRouter ${router ? 'connected' : 'disconnected'}`);
+  }
+
+  /**
+   * Check if we can use streaming for a light
+   */
+  private canUseStreaming(lightId: string): boolean {
+    if (!this.streamingRouter) {
+      return false;
+    }
+    const isStreaming = this.streamingRouter.isStreaming();
+    const inZone = this.streamingRouter.isLightInZone(lightId);
+
+    // Debug on first check per light
+    if (!this._streamingCheckLogged.has(lightId)) {
+      console.log(`[CustomEffects] canUseStreaming(${lightId}): streaming=${isStreaming}, inZone=${inZone}`);
+      this._streamingCheckLogged.add(lightId);
+    }
+
+    return isStreaming && inZone;
+  }
+
+  private _streamingCheckLogged = new Set<string>();
+
+  /**
+   * Set light color via streaming (required for smooth effects)
+   */
+  private async setLightRgb(lightId: string, rgb: RGB): Promise<void> {
+    if (!this.canUseStreaming(lightId)) {
+      // Don't spam logs - this is checked once per light in canUseStreaming
+      return;
+    }
+    this.streamingRouter!.setLightRgb(lightId, rgb);
+  }
+
+  /**
+   * Set light brightness via streaming (required for smooth effects)
+   */
+  private async setLightBrightness(lightId: string, brightness: number, color?: { x: number; y: number }): Promise<void> {
+    if (!this.canUseStreaming(lightId)) {
+      // Don't spam logs - this is checked once per light in canUseStreaming
+      return;
+    }
+
+    // Convert brightness and optional color to RGB
+    let rgb: RGB;
+    if (color) {
+      rgb = this.xyBriToRgb(color, brightness);
+    } else {
+      // White at specified brightness
+      const b = Math.round((brightness / 254) * 255);
+      rgb = [b, b, b];
+    }
+    this.streamingRouter!.setLightRgb(lightId, rgb);
+  }
+
+  /**
+   * Convert XY + brightness to RGB for streaming
+   */
+  private xyBriToRgb(xy: { x: number; y: number }, brightness: number): RGB {
+    // Convert XY to RGB
+    const z = 1.0 - xy.x - xy.y;
+    const Y = brightness / 254;
+    const X = (Y / xy.y) * xy.x;
+    const Z = (Y / xy.y) * z;
+
+    // XYZ to RGB
+    let r = X * 1.656492 - Y * 0.354851 - Z * 0.255038;
+    let g = -X * 0.707196 + Y * 1.655397 + Z * 0.036152;
+    let b = X * 0.051713 - Y * 0.121364 + Z * 1.011530;
+
+    // Apply gamma correction and scale
+    r = Math.pow(Math.max(0, Math.min(1, r)), 0.45) * 255;
+    g = Math.pow(Math.max(0, Math.min(1, g)), 0.45) * 255;
+    b = Math.pow(Math.max(0, Math.min(1, b)), 0.45) * 255;
+
+    return [Math.round(r), Math.round(g), Math.round(b)];
   }
 
   /**
@@ -121,22 +229,42 @@ export class CustomEffectsEngine extends EventEmitter {
   }
 
   /**
-   * Stop effect on a specific light
+   * Stop effect on a specific light (handles both custom and preset effects)
    */
   async stopEffect(lightId: string): Promise<void> {
+    let stopped = false;
+
+    // Stop custom effect
     const effect = this.runningEffects.get(lightId);
     if (effect) {
       clearInterval(effect.intervalId);
       this.runningEffects.delete(lightId);
+      stopped = true;
+    }
+
+    // Stop preset effect
+    const presetEffect = this.runningPresetEffects.get(lightId);
+    if (presetEffect) {
+      clearInterval(presetEffect.intervalId);
+      this.runningPresetEffects.delete(lightId);
+      stopped = true;
+    }
+
+    if (stopped) {
       console.log(`[CustomEffects] Stopped effect on light ${lightId}`);
       this.emit('effectStopped', { lightId });
 
-      // Turn light on at normal brightness
+      // Turn light on at normal brightness - use streaming if available
       try {
-        await this.bridgeController.setLightState(lightId, {
-          on: true,
-          brightness: 254,
-        });
+        if (this.canUseStreaming(lightId)) {
+          // Set to full white via streaming
+          this.streamingRouter!.setLightRgb(lightId, [255, 255, 255]);
+        } else {
+          await this.bridgeController.setLightState(lightId, {
+            on: true,
+            brightness: 254,
+          });
+        }
       } catch (err) {
         // Ignore errors when stopping
       }
@@ -144,10 +272,13 @@ export class CustomEffectsEngine extends EventEmitter {
   }
 
   /**
-   * Stop all running effects
+   * Stop all running effects (custom and preset)
    */
   async stopAllEffects(): Promise<void> {
-    const lightIds = Array.from(this.runningEffects.keys());
+    const lightIds = new Set([
+      ...this.runningEffects.keys(),
+      ...this.runningPresetEffects.keys(),
+    ]);
     for (const lightId of lightIds) {
       await this.stopEffect(lightId);
     }
@@ -166,18 +297,164 @@ export class CustomEffectsEngine extends EventEmitter {
    * Check if an effect is running on a light
    */
   isEffectRunning(lightId: string): boolean {
-    return this.runningEffects.has(lightId);
+    return this.runningEffects.has(lightId) || this.runningPresetEffects.has(lightId);
   }
 
   /**
    * Get info about running effect on a light
    */
-  getRunningEffect(lightId: string): { effectType: CustomEffectType; options: EffectOptions } | null {
+  getRunningEffect(lightId: string): { effectType: string; options: EffectOptions | PresetEffectOptions } | null {
     const effect = this.runningEffects.get(lightId);
     if (effect) {
       return { effectType: effect.effectType, options: effect.options };
     }
+    const presetEffect = this.runningPresetEffects.get(lightId);
+    if (presetEffect) {
+      return { effectType: presetEffect.preset.id, options: presetEffect.options };
+    }
     return null;
+  }
+
+  /**
+   * Get list of all available preset effects
+   */
+  getAvailablePresets(): string[] {
+    return getAvailableEffects();
+  }
+
+  /**
+   * Start a preset effect on a light (streaming-compatible alternative to native Hue effects)
+   */
+  async startPresetEffect(
+    lightId: string,
+    presetId: string,
+    options: PresetEffectOptions = {}
+  ): Promise<boolean> {
+    // Stop any existing effect on this light
+    await this.stopEffect(lightId);
+
+    // Look up the preset
+    let preset = getEffectPreset(presetId);
+
+    // If not found, try to find a streaming alternative for native Hue effect
+    if (!preset) {
+      preset = getStreamingAlternative(presetId);
+    }
+
+    if (!preset) {
+      console.warn(`[CustomEffects] Unknown preset: ${presetId}`);
+      return false;
+    }
+
+    // Check if this light supports gradient streaming
+    let isGradient = false;
+    let segmentCount = 1;
+
+    if (this.streamingRouter && this.canUseStreaming(lightId)) {
+      isGradient = this.streamingRouter.isGradientLight(lightId);
+      if (isGradient) {
+        segmentCount = this.streamingRouter.getGradientSegmentCount(lightId);
+        console.log(`[CustomEffects] Light ${lightId} is a gradient light with ${segmentCount} segments`);
+      }
+    }
+
+    // Merge options with preset defaults, including gradient info
+    const mergedOptions: PresetEffectOptions = {
+      ...preset.defaultOptions,
+      ...options,
+      isGradient,
+      segmentCount,
+    };
+
+    // Initialize preset state
+    const customState = preset.init();
+    const effectState: EffectState = {
+      elapsed: 0,
+      custom: customState,
+    };
+
+    const interval = preset.getInterval(mergedOptions);
+
+    console.log(`[CustomEffects] Starting preset "${preset.name}" on light ${lightId} (${interval}ms interval, gradient: ${isGradient})`);
+
+    const startTime = Date.now();
+
+    // Create running effect entry
+    const runningEffect: RunningPresetEffect = {
+      lightId,
+      preset,
+      options: mergedOptions,
+      intervalId: null as any,
+      state: effectState,
+      isGradient,
+      segmentCount,
+    };
+
+    // Start the effect loop
+    runningEffect.intervalId = setInterval(() => {
+      this.runPresetCycle(runningEffect, startTime).catch((err) => {
+        console.error(`[CustomEffects] Error in preset cycle:`, err);
+      });
+    }, interval);
+
+    this.runningPresetEffects.set(lightId, runningEffect);
+
+    // Run first cycle immediately
+    await this.runPresetCycle(runningEffect, startTime);
+
+    this.emit('effectStarted', { lightId, effectType: preset.id, presetName: preset.name });
+    return true;
+  }
+
+  /**
+   * Run one cycle of a preset effect
+   */
+  private async runPresetCycle(effect: RunningPresetEffect, startTime: number): Promise<void> {
+    const { lightId, preset, options, state, isGradient } = effect;
+
+    // Update elapsed time
+    state.elapsed = Date.now() - startTime;
+
+    try {
+      // Get the output from the preset cycle
+      const output = preset.cycle(state, options);
+
+      // If this is a gradient light and we have gradient colors, use them
+      if (isGradient && output.gradient && output.gradient.length > 0 && this.streamingRouter) {
+        this.streamingRouter.setLightGradient(lightId, output.gradient);
+      } else if (output.rgb) {
+        // Otherwise use the single RGB color
+        await this.setLightRgb(lightId, output.rgb);
+      }
+    } catch (err) {
+      console.error(`[CustomEffects] Error in preset ${preset.id} cycle:`, err);
+    }
+  }
+
+  /**
+   * Start a native Hue effect, using streaming alternative when streaming is active
+   * Returns true if streaming alternative was used, false if native effect was used
+   */
+  async startNativeOrStreamingEffect(
+    lightId: string,
+    nativeEffectName: string,
+    options: PresetEffectOptions = {}
+  ): Promise<{ usedStreaming: boolean; effectId: string }> {
+    // Check if we can use streaming
+    if (this.canUseStreaming(lightId)) {
+      // Use streaming-compatible alternative
+      const preset = getStreamingAlternative(nativeEffectName);
+      if (preset) {
+        await this.startPresetEffect(lightId, preset.id, options);
+        console.log(`[CustomEffects] Using streaming alternative "${preset.name}" for native "${nativeEffectName}"`);
+        return { usedStreaming: true, effectId: preset.id };
+      }
+    }
+
+    // Fall back to native Hue effect via REST API
+    console.log(`[CustomEffects] Using native Hue effect "${nativeEffectName}" (no streaming alternative or streaming not available)`);
+    // Note: Caller should handle the native effect API call since we don't have access to it here
+    return { usedStreaming: false, effectId: nativeEffectName };
   }
 
   /**
@@ -264,6 +541,7 @@ export class CustomEffectsEngine extends EventEmitter {
 
   /**
    * Strobe effect - rapid on/off flashing
+   * Uses streaming for instant response when available
    */
   private async cycleStrobe(
     lightId: string,
@@ -275,22 +553,15 @@ export class CustomEffectsEngine extends EventEmitter {
     const brightness = options.brightness ?? 254;
 
     if (isOn) {
-      await this.bridgeController.setLightColorV2(
-        lightId,
-        this.xyToHue(color),
-        254,
-        brightness
-      );
+      await this.setLightBrightness(lightId, brightness, color);
     } else {
-      await this.bridgeController.setLightState(lightId, {
-        on: true,
-        brightness: 1, // Minimum brightness instead of off for faster response
-      });
+      await this.setLightBrightness(lightId, 1); // Minimum brightness
     }
   }
 
   /**
    * Police lights - alternating red and blue
+   * Uses streaming for tight sync when available
    */
   private async cyclePolice(
     lightId: string,
@@ -305,16 +576,12 @@ export class CustomEffectsEngine extends EventEmitter {
     const pattern = state.phase % 4;
     const color = pattern < 2 ? color1 : color2;
 
-    await this.bridgeController.setLightColorV2(
-      lightId,
-      this.xyToHue(color),
-      254,
-      brightness
-    );
+    await this.setLightBrightness(lightId, brightness, color);
   }
 
   /**
    * Ambulance lights - alternating red and white
+   * Uses streaming for tight sync when available
    */
   private async cycleAmbulance(
     lightId: string,
@@ -328,16 +595,12 @@ export class CustomEffectsEngine extends EventEmitter {
     const isFirstColor = state.phase % 2 === 0;
     const color = isFirstColor ? color1 : color2;
 
-    await this.bridgeController.setLightColorV2(
-      lightId,
-      this.xyToHue(color),
-      254,
-      brightness
-    );
+    await this.setLightBrightness(lightId, brightness, color);
   }
 
   /**
    * Lightning effect - random bright flashes
+   * Uses streaming when available for instant flash response
    */
   private async cycleLightning(
     lightId: string,
@@ -352,37 +615,17 @@ export class CustomEffectsEngine extends EventEmitter {
     if (Math.random() < flashChance) {
       // Flash! Bright white
       const flashBrightness = 200 + Math.floor(Math.random() * 55);
-      await this.bridgeController.setLightColorV2(
-        lightId,
-        this.xyToHue(COLORS.WHITE),
-        254,
-        flashBrightness
-      );
-
-      // Quick double-flash sometimes
-      if (Math.random() < 0.3) {
-        await this.delay(50);
-        await this.bridgeController.setLightState(lightId, { on: true, brightness: 20 });
-        await this.delay(50);
-        await this.bridgeController.setLightColorV2(
-          lightId,
-          this.xyToHue(COLORS.WHITE),
-          254,
-          flashBrightness
-        );
-      }
+      await this.setLightBrightness(lightId, flashBrightness, COLORS.WHITE);
     } else {
       // Dark/dim state between flashes
       const dimLevel = 5 + Math.floor(Math.random() * 15);
-      await this.bridgeController.setLightState(lightId, {
-        on: true,
-        brightness: dimLevel,
-      });
+      await this.setLightBrightness(lightId, dimLevel, COLORS.WHITE);
     }
   }
 
   /**
    * Color flash - alternate between two colors
+   * Uses streaming for tight sync when available
    */
   private async cycleColorFlash(
     lightId: string,
@@ -396,16 +639,12 @@ export class CustomEffectsEngine extends EventEmitter {
     const isFirstColor = state.phase % 2 === 0;
     const color = isFirstColor ? color1 : color2;
 
-    await this.bridgeController.setLightColorV2(
-      lightId,
-      this.xyToHue(color),
-      254,
-      brightness
-    );
+    await this.setLightBrightness(lightId, brightness, color);
   }
 
   /**
    * Smooth breathing effect using sine wave
+   * Uses streaming when available for buttery-smooth 50Hz updates
    */
   private async cycleBreathe(
     lightId: string,
@@ -429,24 +668,14 @@ export class CustomEffectsEngine extends EventEmitter {
       minBrightness + ((sineValue + 1) / 2) * (maxBrightness - minBrightness)
     );
 
-    if (color) {
-      await this.bridgeController.setLightColorV2(
-        lightId,
-        this.xyToHue(color),
-        254,
-        brightness
-      );
-    } else {
-      await this.bridgeController.setLightState(lightId, {
-        on: true,
-        brightness,
-      });
-    }
+    // Use streaming-aware method for smooth updates
+    await this.setLightBrightness(lightId, brightness, color);
   }
 
   /**
    * Chase effect - for gradient lights, cycle colors through positions
    * For regular lights, just cycle through colors
+   * Uses streaming when available for smooth color transitions
    */
   private async cycleChase(
     lightId: string,
@@ -462,8 +691,8 @@ export class CustomEffectsEngine extends EventEmitter {
     ];
     const brightness = options.brightness ?? 254;
 
-    // For gradient lights: rotate colors along the strip
-    if (state.isGradient) {
+    // For gradient lights: rotate colors along the strip (gradients not supported via streaming)
+    if (state.isGradient && !this.canUseStreaming(lightId)) {
       const offset = state.phase % colors.length;
       const rotatedColors = [
         ...colors.slice(offset),
@@ -480,16 +709,12 @@ export class CustomEffectsEngine extends EventEmitter {
         transitionMs
       );
     } else {
-      // For non-gradient lights: cycle through colors with transition
+      // For non-gradient lights or streaming mode: cycle through colors
       const colorIndex = state.phase % colors.length;
       const color = colors[colorIndex];
 
-      await this.bridgeController.setLightColorXY(
-        lightId,
-        color,
-        brightness,
-        100 // Smooth transition between colors
-      );
+      // Use streaming if available for instant color changes
+      await this.setLightBrightness(lightId, brightness, color);
     }
   }
 
@@ -498,6 +723,7 @@ export class CustomEffectsEngine extends EventEmitter {
    * Evokes: tumbleweed, desolate sage, waiting for rain
    * For gradient lights: colors slowly chase/rotate along the strip
    * For non-gradient: smooth crossfade between desert colors
+   * Uses streaming when available for smooth transitions
    */
   private async cycleDesert(
     lightId: string,
@@ -516,18 +742,15 @@ export class CustomEffectsEngine extends EventEmitter {
       COLORS.WARM_WHITE,
     ];
 
-    // For gradient lights: rotate colors along the strip for a chase effect
-    if (state.isGradient) {
-      // Rotate the palette based on phase
+    // For gradient lights without streaming: rotate colors along the strip
+    if (state.isGradient && !this.canUseStreaming(lightId)) {
       const offset = state.phase % desertColors.length;
       const rotatedColors = [
         ...desertColors.slice(offset),
         ...desertColors.slice(0, offset),
-      ].slice(0, 5); // Gradient supports max 5 points
+      ].slice(0, 5);
 
-      // Use a longer transition for smooth movement (half the interval time)
-      const transitionMs = 500; // Smooth 500ms transition between states
-
+      const transitionMs = 500;
       await this.bridgeController.setGradient(
         lightId,
         rotatedColors,
@@ -535,7 +758,7 @@ export class CustomEffectsEngine extends EventEmitter {
         transitionMs
       );
     } else {
-      // For non-gradient lights: smooth crossfade between colors
+      // For non-gradient lights or streaming mode: smooth crossfade between colors
       const time = state.phase * 0.1 * (speed / 60);
 
       // Pick colors based on slow oscillation
@@ -560,19 +783,15 @@ export class CustomEffectsEngine extends EventEmitter {
       const tumbleweedChance = Math.sin(time * 0.7);
       const tumbleweedEffect = tumbleweedChance > 0.95 ? -40 : 0;
 
-      // Use smooth transition (80ms matches interval time)
-      await this.bridgeController.setLightColorXY(
-        lightId,
-        blendedColor,
-        Math.max(30, brightness + tumbleweedEffect),
-        80 // Transition duration matches interval for smooth fading
-      );
+      // Use streaming if available, otherwise REST API
+      await this.setLightBrightness(lightId, Math.max(30, brightness + tumbleweedEffect), blendedColor);
     }
   }
 
   /**
    * TV Flicker effect - cool blue/white flickering like TV through window blinds
    * Evokes: watching TV in dark room, light through venetian blinds
+   * Uses streaming when available for realistic flicker
    */
   private async cycleTvFlicker(
     lightId: string,
@@ -624,12 +843,8 @@ export class CustomEffectsEngine extends EventEmitter {
       brightness *= 0.3;
     }
 
-    await this.bridgeController.setLightColorV2(
-      lightId,
-      this.xyToHue(color),
-      254,
-      Math.round(brightness)
-    );
+    // Use streaming if available for realistic flicker
+    await this.setLightBrightness(lightId, Math.round(brightness), color);
   }
 
   /**

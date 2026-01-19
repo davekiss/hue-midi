@@ -21,7 +21,12 @@ export class ConfigManager {
       midiPortName: undefined,
       bridgeIp: undefined,
       bridgeUsername: undefined,
-      scenes: []
+      scenes: [],
+      streaming: {
+        enabled: false,
+        entertainmentConfigId: undefined,
+        clientKey: undefined,
+      },
     };
   }
 
@@ -34,6 +39,14 @@ export class ConfigManager {
       this.config = JSON.parse(data);
       if (!Array.isArray(this.config.scenes)) {
         this.config.scenes = [];
+      }
+      // Ensure streaming config exists
+      if (!this.config.streaming) {
+        this.config.streaming = {
+          enabled: false,
+          entertainmentConfigId: undefined,
+          clientKey: undefined,
+        };
       }
       console.log(`Configuration loaded from ${this.configPath}`);
       return this.config;
@@ -82,20 +95,22 @@ export class ConfigManager {
    */
   addMapping(mapping: MidiMapping): void {
     if (mapping.triggerType === 'cc') {
-      // Remove existing CC mapping with same ccNumber/channel/ccValue
+      // Remove existing CC mapping with same ccNumber/channel/ccValue/preset
       this.config.mappings = this.config.mappings.filter(m => {
         if (m.triggerType !== 'cc') return true;
         if (m.ccNumber !== mapping.ccNumber || m.midiChannel !== mapping.midiChannel) return true;
-        // Same CC number and channel - check value match
+        // Different preset = different mapping, keep it
+        if (m.preset !== mapping.preset) return true;
+        // Same CC number, channel, and preset - check value match
         if (mapping.ccValue !== undefined && m.ccValue !== undefined) {
           return m.ccValue !== mapping.ccValue;
         }
-        return false; // Remove if both are any-value mappings
+        return false; // Remove if both are any-value mappings for same preset
       });
     } else {
-      // Remove existing note mapping with same note/channel
+      // Remove existing note mapping with same note/channel/preset
       this.config.mappings = this.config.mappings.filter(
-        m => !(m.triggerType !== 'cc' && m.midiNote === mapping.midiNote && m.midiChannel === mapping.midiChannel)
+        m => !(m.triggerType !== 'cc' && m.midiNote === mapping.midiNote && m.midiChannel === mapping.midiChannel && m.preset === mapping.preset)
       );
     }
     this.config.mappings.push(mapping);
@@ -104,22 +119,28 @@ export class ConfigManager {
   /**
    * Remove mapping from config
    */
-  removeMapping(note: number, channel: number, triggerType?: 'note' | 'cc', ccValue?: number): void {
+  removeMapping(note: number, channel: number, triggerType?: 'note' | 'cc', ccValue?: number, preset?: number): void {
     if (triggerType === 'cc') {
       // Remove CC mapping
       this.config.mappings = this.config.mappings.filter(m => {
         if (m.triggerType !== 'cc') return true;
         if (m.ccNumber !== note || m.midiChannel !== channel) return true;
+        // If preset is specified, only remove mappings with matching preset
+        if (preset !== undefined && m.preset !== preset) return true;
         if (ccValue !== undefined) {
           return m.ccValue !== ccValue;
         }
-        return false; // Remove all CC mappings for this number/channel
+        return false; // Remove matching CC mapping
       });
     } else {
       // Remove note mapping
-      this.config.mappings = this.config.mappings.filter(
-        m => !(m.triggerType !== 'cc' && m.midiNote === note && m.midiChannel === channel)
-      );
+      this.config.mappings = this.config.mappings.filter(m => {
+        if (m.triggerType === 'cc') return true;
+        if (m.midiNote !== note || m.midiChannel !== channel) return true;
+        // If preset is specified, only remove mappings with matching preset
+        if (preset !== undefined && m.preset !== preset) return true;
+        return false;
+      });
     }
   }
 
@@ -155,5 +176,24 @@ export class ConfigManager {
 
   removeScene(sceneId: string): void {
     this.config.scenes = this.config.scenes.filter(scene => scene.id !== sceneId);
+  }
+
+  /**
+   * Update streaming configuration
+   */
+  updateStreamingConfig(updates: Partial<Config['streaming']>): void {
+    this.config.streaming = {
+      ...this.config.streaming,
+      enabled: updates?.enabled ?? this.config.streaming?.enabled ?? false,
+      entertainmentConfigId: updates?.entertainmentConfigId ?? this.config.streaming?.entertainmentConfigId,
+      clientKey: updates?.clientKey ?? this.config.streaming?.clientKey,
+    };
+  }
+
+  /**
+   * Get streaming configuration
+   */
+  getStreamingConfig(): Config['streaming'] {
+    return this.config.streaming;
   }
 }
