@@ -1,232 +1,221 @@
-# Hue MIDI Bridge
+# Hue MIDI
 
-Control your Philips Hue lights with MIDI from Ableton Live, MIDI controllers, or any MIDI source.
+Real-time Philips Hue light control via MIDI. Connect your DAW, MIDI controller, or any MIDI source to create dynamic, music-synchronized lighting.
 
-## Features
+## What It Does
 
-- **MIDI Input**: Virtual MIDI port or connect to physical MIDI devices
-- **Hue Bridge Support**: Full control via Philips Hue Bridge API
-- **Bluetooth Support**: Direct BLE control for bridge-free setups ([Bluetooth Guide](BLUETOOTH_GUIDE.md))
-- **Flexible Mapping**: Map MIDI notes to specific lights with custom actions
-- **Multiple Actions**:
-  - Color changes with hue/saturation control
-  - Brightness control (velocity-based or fixed)
-  - On/Off toggle
-  - Effects (color loop, flash, pulse)
-- **Web UI**: Easy-to-use interface for configuration
-- **Real-time Monitoring**: See MIDI activity and light control events
-- **Persistent Config**: Mappings are saved and restored on restart
+- Maps MIDI notes, Control Change (CC), and Program Change messages to light actions
+- Streams color changes at 50Hz using the Hue Entertainment API for smooth animations
+- Extracts BPM from MIDI clock for tempo-synced effects
+- Runs 20+ built-in effect presets (fire, aurora, ocean, chase patterns, and more)
+- Supports gradient lights with per-segment color control
 
-## Prerequisites
+## Architecture
 
-- Node.js 18+ and npm
-- **Either:**
-  - Philips Hue Bridge + Hue lights connected to it, **OR**
-  - Bluetooth-enabled Hue lights (2019+) + System with Bluetooth
-- For Bluetooth setup without a bridge, see [BLUETOOTH_GUIDE.md](BLUETOOTH_GUIDE.md)
-
-## Installation
-
-1. Install dependencies:
-```bash
-npm install
+```
+hue-midi/
+├── client/          # React frontend (Vite + Zustand + Tailwind)
+├── server/          # Node.js backend (Express + WebSocket)
+│   ├── effects/     # Effect presets and custom effects engine
+│   ├── hue/         # Bridge controller and API v2 implementation
+│   ├── mapping/     # MIDI-to-light mapping engine
+│   ├── midi/        # MIDI input handling and clock parsing
+│   └── streaming/   # Entertainment API (DTLS) streaming
+└── config.json      # Persisted configuration
 ```
 
-2. Build the TypeScript code:
+## Requirements
+
+- Node.js 18+
+- Philips Hue Bridge with Entertainment API support
+- Hue lights connected to the bridge
+
+## Setup
+
+Install dependencies and build:
+
 ```bash
-npm run build
+cd server && npm install
+cd ../client && npm install && npm run build
 ```
 
-## Usage
+Start the server:
 
-### Starting the Server
-
-**Development mode** (with auto-reload):
 ```bash
-npm run dev
+cd server && npm run dev
 ```
 
-**Production mode**:
-```bash
-npm start
+Open `http://localhost:3000` in your browser.
+
+### Connecting to Your Bridge
+
+1. Click **Discover Bridges** in the web UI
+2. Press the physical link button on your Hue Bridge
+3. Click **Connect** within 30 seconds
+4. Lights will be discovered automatically
+
+### Setting Up MIDI
+
+Select an existing MIDI port from the dropdown, or create a virtual port that appears as "Hue MIDI Bridge" in your DAW.
+
+### Enabling Streaming Mode
+
+For 50Hz real-time control (required for smooth effects):
+
+1. Go to **Streaming Settings**
+2. Click **Generate Client Key**
+3. Select an Entertainment Configuration (create one in the Hue app if needed)
+4. Toggle streaming on
+
+## MIDI Mappings
+
+### Supported Message Types
+
+| Type | Use Case |
+|------|----------|
+| Note On/Off | Trigger colors, effects, or scenes. Velocity controls brightness. |
+| Control Change (CC) | Continuous control (e.g., faders for brightness) or discrete triggers |
+| Program Change (PC) | Switch between preset banks/snapshots |
+| MIDI Clock | Automatic BPM extraction for tempo-synced effects |
+
+### Mapping Actions
+
+- **Color**: Set hue/saturation with velocity-based or fixed brightness
+- **Effect**: Trigger built-in or custom effects
+- **Scene**: Activate multi-light scenes with animations
+- **Toggle**: Turn lights on/off
+
+Mappings can be scoped to specific Program Change numbers, useful for song-specific lighting in a setlist.
+
+## Effects
+
+### Native Hue Effects
+`sparkle`, `fire`, `candle`, `prism`, `opal`, `glisten`
+
+### Custom Streaming Effects
+Require streaming mode enabled:
+
+**Nature**: `candle`, `fire`, `fireplace`, `aurora`, `ocean`, `underwater`, `lava`, `thunderstorm`, `rain`, `forest`, `starfield`, `galaxy`
+
+**Chase**: `marquee`, `theater`, `rainbow_chase`, `wave_chase`, `bounce_chase`, `comet_chase`, `pulse_chase`
+
+**Ambient**: `sparkle`, `prism`, `colorloop`, `tv_ballast`, `fluorescent`
+
+**Alert**: `strobe`, `police`, `ambulance`, `lightning`
+
+### Effect Options
+
+- `speed`: BPM (20-300) for tempo control
+- `color1`, `color2`: Primary and secondary colors
+- `brightness`: 0-254
+- `intensity`: Effect strength (0-1)
+
+## Scenes
+
+Scenes capture multi-light states and can include:
+
+- Initial light states (color, brightness, on/off)
+- Looping animations with multiple steps
+- Transition timing and easing
+- Beat-synchronized step changes
+
+## API
+
+### REST Endpoints
+
+```
+GET  /api/config              # Get configuration
+POST /api/config              # Update configuration
+
+GET  /api/midi/ports          # List available MIDI ports
+POST /api/midi/port           # Connect to a port
+
+GET  /api/hue/bridges         # Discover bridges
+POST /api/hue/bridge/connect  # Connect to bridge
+GET  /api/hue/lights          # Get all lights
+
+GET  /api/mappings            # Get all mappings
+POST /api/mappings            # Create mapping
+DELETE /api/mappings/:ch/:note # Delete mapping
+
+GET  /api/scenes              # Get all scenes
+POST /api/scenes              # Create scene
+
+POST /api/hue/entertainment/start  # Start streaming
+GET  /api/hue/entertainment/status # Get streaming status
 ```
 
-The server will start on `http://localhost:3000`
+### WebSocket Events
 
-### Initial Setup
+Connect to `ws://localhost:3000` for real-time updates:
 
-1. **Open the web UI**: Navigate to `http://localhost:3000` in your browser
+- `midi` - MIDI message received
+- `tempo` - BPM update from MIDI clock
+- `lightControlled` - Light state changed
+- `presetChanged` - Program Change received
+- `error` - Error occurred
 
-2. **Set up MIDI**:
-   - Click "Create Virtual MIDI Port" to create a port named "Hue MIDI Bridge"
-   - Or connect to an existing physical MIDI port
+## Configuration
 
-3. **Connect to Hue Bridge**:
-   - Click "Discover Bridges"
-   - Click "Setup" next to your bridge
-   - Press the physical link button on your Hue Bridge
-   - Wait for connection confirmation
-
-4. **Refresh Lights**:
-   - Click "Refresh Lights" to see your available lights
-
-5. **Create MIDI Mappings**:
-   - Click "Add New Mapping"
-   - Configure:
-     - MIDI Channel (0-15)
-     - MIDI Note (0-127)
-     - Target Light
-     - Action Type (color, brightness, toggle, effect)
-     - Additional parameters based on action type
-   - Click "Add Mapping"
-
-### Using with Ableton Live
-
-1. Start the Hue MIDI Bridge server
-2. In Ableton Live:
-   - Go to Preferences → Link/Tempo/MIDI
-   - Under "MIDI Ports", enable "Hue MIDI Bridge" as a MIDI output
-3. Create a MIDI track
-4. Set the MIDI track output to "Hue MIDI Bridge"
-5. Create MIDI clips or use a MIDI controller on that track
-6. Your configured MIDI notes will now control your Hue lights!
-
-### Example Mappings
-
-**Red color on MIDI note 60 (C3)**:
-- Channel: 0
-- Note: 60
-- Action: Color
-- Hue: 0
-- Saturation: 254
-- Brightness Mode: Velocity
-
-**Flash effect on MIDI note 64 (E3)**:
-- Channel: 0
-- Note: 64
-- Action: Effect
-- Effect: Flash
-
-**Toggle light on/off with MIDI note 72**:
-- Channel: 0
-- Note: 72
-- Action: Toggle
-
-## Configuration File
-
-Mappings and settings are saved to `config.json` in the project directory. Example:
+Settings are persisted to `config.json`:
 
 ```json
 {
   "connectionMode": "bridge",
-  "bridgeIp": "192.168.1.100",
-  "bridgeUsername": "your-username-here",
+  "bridgeIp": "192.168.1.x",
+  "bridgeUsername": "...",
   "midiPortName": "Hue MIDI Bridge",
-  "mappings": [
-    {
-      "midiNote": 60,
-      "midiChannel": 0,
-      "lightId": "1",
-      "action": {
-        "type": "color",
-        "colorHue": 0,
-        "colorSat": 254,
-        "brightnessMode": "velocity",
-        "transitionTime": 2
-      }
-    }
-  ]
+  "mappings": [],
+  "scenes": [],
+  "streaming": {
+    "enabled": false,
+    "entertainmentConfigId": "...",
+    "clientKey": "..."
+  }
 }
 ```
 
-## API Endpoints
+Copy `config.example.json` to `config.json` to get started, or let the app generate one on first run.
 
-The server exposes a REST API:
+## Using with Ableton Live
 
-- `GET /api/config` - Get current configuration
-- `POST /api/config` - Update configuration
-- `GET /api/midi/ports` - List MIDI ports
-- `POST /api/midi/port` - Connect to MIDI port
-- `GET /api/hue/bridges` - Discover Hue Bridges
-- `POST /api/hue/bridge/user` - Create bridge user
-- `POST /api/hue/bridge/connect` - Connect to bridge
-- `GET /api/hue/lights` - Get all lights
-- `GET /api/mappings` - Get all mappings
-- `POST /api/mappings` - Add mapping
-- `DELETE /api/mappings/:channel/:note` - Remove mapping
-- `POST /api/mappings/clear` - Clear all mappings
-- `POST /api/test/light` - Test light control
-
-## WebSocket Events
-
-Real-time updates via WebSocket:
-
-- `midi` - MIDI message received
-- `lightControlled` - Light was controlled
-- `error` - Error occurred
+1. Start Hue MIDI server
+2. In Ableton: Preferences → Link/Tempo/MIDI → Enable "Hue MIDI Bridge" as output
+3. Route a MIDI track to "Hue MIDI Bridge"
+4. Send MIDI clock for BPM sync (enable in Preferences)
+5. Notes and CCs on that track will trigger your mappings
 
 ## Color Reference
 
-Hue uses 16-bit color values (0-65535). Some common values:
+Hue values (0-65535):
 
-- Red: 0
-- Orange: 5000
-- Yellow: 12750
-- Green: 25500
-- Cyan: 36210
-- Blue: 46920
-- Purple: 52225
-- Pink: 56100
+| Color | Value |
+|-------|-------|
+| Red | 0 |
+| Orange | 5000 |
+| Yellow | 12750 |
+| Green | 25500 |
+| Cyan | 36210 |
+| Blue | 46920 |
+| Purple | 52225 |
+| Pink | 56100 |
 
-Saturation is 0-254 (0 = white, 254 = fully saturated)
-
-## Troubleshooting
-
-**MIDI port not showing in Ableton**:
-- Make sure the server is running
-- Check Ableton's MIDI preferences
-- Try restarting Ableton after starting the server
-
-**Can't connect to Hue Bridge**:
-- Ensure bridge is on the same network
-- Press the link button before clicking "Setup"
-- Check that your bridge firmware is up to date
-
-**Lights not responding**:
-- Verify lights are reachable in the Hue app
-- Check that mappings are configured correctly
-- Watch the Activity Monitor for MIDI messages
-
-**Bluetooth not working**:
-- Bluetooth support is experimental
-- Use Bridge mode for best experience
-- Check that your system has Bluetooth enabled
+Saturation: 0 (white) to 254 (fully saturated)
 
 ## Development
 
-Project structure:
+Run client and server in development mode:
+
+```bash
+# Terminal 1: Server with auto-reload
+cd server && npm run dev
+
+# Terminal 2: Client dev server (optional, for hot reload)
+cd client && npm run dev
 ```
-hue-midi/
-├── src/
-│   ├── types/           # TypeScript type definitions
-│   ├── midi/            # MIDI handling
-│   ├── hue/             # Hue Bridge & Bluetooth controllers
-│   ├── mapping/         # Mapping engine & config
-│   ├── server/          # Express API server
-│   └── index.ts         # Main entry point
-├── public/              # Web UI files
-├── config.json          # Configuration (auto-generated)
-└── package.json
-```
+
+The client builds to `server/public/` for production.
 
 ## License
 
 ISC
-
-## Credits
-
-Built with:
-- [node-hue-api](https://github.com/peter-murray/node-hue-api) - Philips Hue API
-- [node-midi](https://github.com/justinlatimer/node-midi) - MIDI I/O
-- [Express](https://expressjs.com/) - Web server
-- [ws](https://github.com/websockets/ws) - WebSocket server
